@@ -6,9 +6,10 @@ import { serveStatic } from "hono/middleware";
 import * as kvOps from "./replacekeys.ts"; // Keep existing kvOps import for other functions
 // --- 导入新的代理处理模块 ---
 import { handleGenericProxy } from "./proxy_handler.ts";
-import { loadAndCacheAllKvConfigs, initializeAndCacheGcpAuth } from "./cache.ts";
+// 移除旧的缓存初始化函数导入
+// import { loadAndCacheAllKvConfigs, initializeAndCacheGcpAuth } from "./cache.ts";
 
-// --- 辅助函数 (非代理相关) ---
+// --- 辅助函数 (非代理相关) (保持不变) ---
 /** 创建 JSON 错误响应 */
 function createErrorPayload(message: string, status: number = 500): Response {
 	return new Response(JSON.stringify({ error: message }), {
@@ -32,7 +33,7 @@ const app = new Hono();
 // CORS - Will be applied selectively
 
 
-// --- 静态文件路由 ---
+// --- 静态文件路由 (保持不变) ---
 app.get('/manage', serveStatic({ path: './src/manage.html' }));
 app.get('/manage.html', serveStatic({ path: './src/manage.html' })); // 别名
 app.get('/manage.js', serveStatic({ path: './src/manage.js' }));
@@ -46,13 +47,16 @@ app.get('/manage.js', serveStatic({ path: './src/manage.js' }));
 app.post('/api/manage/login', async (c) => {
 	try {
 		const { password } = await c.req.json();
+		// 使用 await 调用异步的 verifyAdminPassword
 		const isValid = await kvOps.verifyAdminPassword(password);
 		if (isValid) {
 			return createSuccessPayload({ success: true, message: "Login successful" });
 		} else {
+			// 使用 await 调用异步的 getAdminPasswordHash
 			const hash = await kvOps.getAdminPasswordHash();
 			if (!hash) {
 				if (password && password.length >= 8) {
+					// setAdminPassword 内部会 reload cache
 					await kvOps.setAdminPassword(password);
 					return createSuccessPayload({ success: true, message: "Initial admin password set successfully." });
 				} else {
@@ -74,14 +78,14 @@ import { manageApp } from "./manage_api.ts";
 app.route('/api/manage', manageApp);
 
 
-// --- 代理路由 ---
+// --- 代理路由 (保持不变) ---
 // 移除基于硬编码 apiMapping 的循环路由注册
 // 添加一个通配符路由来捕获所有潜在的代理请求
 // handleGenericProxy 将在内部查询 KV 并处理路由
 // 注意：此路由应放在更具体的静态路由之后
 
 
-// --- 其他路由 ---
+// --- 其他路由 (保持不变) ---
 app.get('/', (c) => c.html('Service is running! Hono version.'));
 app.get('/robots.txt', (c) => c.text('User-agent: *\nDisallow: /'));
 
@@ -89,24 +93,34 @@ app.get('/robots.txt', (c) => c.text('User-agent: *\nDisallow: /'));
 app.all('/*', (c) => handleGenericProxy(c));
 
 
-// --- 全局错误处理 ---
+// --- 全局错误处理 (保持不变) ---
 app.onError((err, c) => {
 	const message = err instanceof Error ? err.message : String(err);
 	let status = 500;
+	// 检查是否是 Response 实例 (可能由代理逻辑抛出)
+	if (err instanceof Response) {
+		// 如果是 Response，直接返回它
+		console.error(`Caught Response error: ${err.status} ${err.statusText}`);
+		return err;
+	}
+	// 检查 Deno 特定的错误
 	if (err instanceof Deno.errors.NotFound) status = 404;
 	// 可以添加更多特定错误类型的检查
-	// 返回 Response 对象
+
+	// 记录更详细的错误信息，包括堆栈跟踪
+	console.error(`Global Error Handler: ${status} - ${message}`, err instanceof Error ? err.stack : '(No stack trace)');
+
+	// 返回标准的 JSON 错误响应
 	return createErrorPayload(`Internal Server Error: ${message}`, status);
 });
 
 // --- 服务器启动 ---
 
-// 确定端口
+// 确定端口 (保持不变)
 let port = 8080;
 const portFromEnv = Deno.env.get("PORT");
-if (portFromEnv) { // 检查是否存在
+if (portFromEnv) {
 	try {
-		// 使用非空断言 (!) 告知 TypeScript portFromEnv 在这里不是 undefined
 		const parsedPort = parseInt(portFromEnv!, 10);
 		if (!isNaN(parsedPort) && parsedPort > 0 && parsedPort < 65536) {
 			port = parsedPort;
@@ -114,24 +128,22 @@ if (portFromEnv) { // 检查是否存在
 	} catch (e) { /* Ignore parse error */ }
 }
 
-// 在启动前初始化 KV 和加载/缓存 GCP 凭证 (使用导入的函数)
-await kvOps.openKv();
-console.log("KV opened.");
+// [重构] 移除启动时的缓存预加载逻辑
+// 只需确保 KV 打开即可 (Lazy loading, removed openKv() call here)
+// await kvOps.openKv(); // Removed this line
+console.log("KV will be opened lazily when needed.");
 
-// 并行加载配置和初始化 GCP Auth (使用导入的函数)
-try {
-	console.log("Starting KV config preloading...");
-	await loadAndCacheAllKvConfigs(); // 预加载所有 KV 配置到缓存
-	console.log("KV configs cached. Initializing GCP Auth instances...");
-	await initializeAndCacheGcpAuth();  // 基于缓存的凭证初始化 GCP Auth 实例
-	console.log("GCP Auth initialized successfully.");
-} catch (error) {
-	console.error("Error during parallel startup initialization:", error);
-	// 根据需要决定服务器是否仍应启动或退出
-	// 当前选择继续启动，但某些功能可能因初始化失败而受影响
-	console.warn("Server might start with incomplete initialization due to errors.");
-}
+// try {
+// 	console.log("Starting KV config preloading...");
+// 	await loadAndCacheAllKvConfigs(); // 预加载所有 KV 配置到缓存
+// 	console.log("KV configs cached. Initializing GCP Auth instances...");
+// 	await initializeAndCacheGcpAuth();  // 基于缓存的凭证初始化 GCP Auth 实例
+// 	console.log("GCP Auth initialized successfully.");
+// } catch (error) {
+// 	console.error("Error during parallel startup initialization:", error);
+// 	console.warn("Server might start with incomplete initialization due to errors.");
+// }
 
-// 启动服务器
+// 启动服务器 (保持不变)
 Deno.serve({ port }, app.fetch);
 console.log(`Server running on http://localhost:${port}`);

@@ -25,10 +25,13 @@ function createSuccessPayload(data: Record<string, any>, status: number = 200): 
 // 管理员密码认证中间件
 const adminAuthMiddleware = async (c: Context, next: () => Promise<void>) => {
 	const adminPassword = c.req.header('X-Admin-Password');
-	// kvOps 需要从导入中使用
-	if (!adminPassword || !(await kvOps.verifyAdminPassword(adminPassword))) {
-		// 使用本地/复制的 createErrorPayload 或 c.json
-		return c.json({ error: "Unauthorized: Invalid or missing X-Admin-Password header" }, 401);
+	if (!adminPassword) {
+		return c.json({ error: "Unauthorized: Missing X-Admin-Password header" }, 401);
+	}
+	// kvOps.verifyAdminPassword 现在是 async，需要 await
+	const isValid = await kvOps.verifyAdminPassword(adminPassword);
+	if (!isValid) {
+		return c.json({ error: "Unauthorized: Invalid X-Admin-Password" }, 401);
 	}
 	await next();
 };
