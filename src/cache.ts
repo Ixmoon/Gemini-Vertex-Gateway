@@ -65,16 +65,16 @@ export const globalCache = new MemoryCache();
 // --- 扩展的缓存键常量 (包含所有需预加载的 KV 键) ---
 export const CACHE_KEYS = {
 	// 来自 replacekeys.ts 的 KV 键 (使用字符串形式)
-	ADMIN_PASSWORD_HASH: ADMIN_PASSWORD_HASH_KEY.join('_'), // "admin_password_hash"
-	TRIGGER_KEYS: TRIGGER_KEYS_KEY.join('_'), // "trigger_keys"
-	POOL_KEYS: POOL_KEYS_KEY.join('_'), // "pool_keys"
-	FALLBACK_KEY: FALLBACK_KEY_KEY.join('_'), // "fallback_key"
-	FALLBACK_MODELS: FALLBACK_MODELS_KEY.join('_'), // "fallback_models"
-	API_RETRY_LIMIT: API_RETRY_LIMIT_KEY.join('_'), // "api_retry_limit"
-	API_MAPPINGS: API_MAPPINGS_KEY.join('_'), // "api_mappings"
-	GCP_CREDENTIALS_STRING: GCP_CREDENTIALS_STRING_KEY.join('_'), // "gcp_credentials_string"
-	GCP_DEFAULT_LOCATION: GCP_DEFAULT_LOCATION_KEY.join('_'), // "gcp_default_location"
-	VERTEX_MODELS: VERTEX_MODELS_KEY.join('_'), // "vertex_models"
+	ADMIN_PASSWORD_HASH: "admin_password_hash",
+	TRIGGER_KEYS: "trigger_keys",
+	POOL_KEYS: "pool_keys",
+	FALLBACK_KEY: "fallback_key",
+	FALLBACK_MODELS: "fallback_models",
+	API_RETRY_LIMIT: "api_retry_limit",
+	API_MAPPINGS: "api_mappings",
+	GCP_CREDENTIALS_STRING: "gcp_credentials_string",
+	GCP_DEFAULT_LOCATION: "gcp_default_location",
+	VERTEX_MODELS: "vertex_models",
 
 	// 新增：用于缓存处理后的 GoogleAuth 实例数组
 	GCP_AUTH_INSTANCES: "gcp_auth_instances",
