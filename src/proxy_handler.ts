@@ -346,58 +346,52 @@ class VertexAIStrategy implements RequestHandlerStrategy {
 		return headers;
 	}
 
-	async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null> {
-		// Vertex 策略需要修改 Body
-		if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD') {
-			return null; // GET/HEAD 不应有 Body
+	async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null | ReadableStream> {
+		// 优先处理无 Body 的请求
+		if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD' || !ctx.originalRequest.body) {
+			return null;
 		}
 
-		let body: any = null;
-
-		try {
-			// 优先使用预解析的 Body
-			if (ctx.parsedBody !== undefined) {
-				body = ctx.parsedBody;
-			} else if (ctx.originalRequest.body) {
-				// 如果没有预解析，则解析原始请求 Body
-				body = await ctx.originalRequest.json();
-			} else {
-				//// console.log("Vertex: No body found");
-				return null; // 没有 Body 内容
-			}
+		// 如果 Body 已经被预解析 (在 determineRequestType 中), 则使用解析后的结果
+		if (ctx.parsedBody !== undefined && ctx.parsedBody !== null) {
+			let bodyToModify = ctx.parsedBody;
 
 			// 确保 body 是一个对象 (如果为 null 或非对象，则无法修改)
-			if (typeof body !== 'object' || body === null) {
-				console.warn("Vertex body is not an object after parsing/retrieval.");
-				throw new Error("Parsed Vertex body is not an object, cannot apply modifications.");// 如果不是对象，无法应用修改，返回原始 Body 的字符串形式（如果可能）或 null
+			if (typeof bodyToModify !== 'object') {
+				console.warn("Vertex: Pre-parsed body is not an object.");
+				// 无法应用修改，但仍需返回 JSON 字符串
+				return JSON.stringify(bodyToModify);
 			}
 
-			// --- 修改 Body 内容 ---
-			if (body.model && typeof body.model === 'string' && !body.model.startsWith('google/')) {
-				body.model = `google/${body.model}`;
+			try {
+				// --- 修改 Body 内容 ---
+				if (bodyToModify.model && typeof bodyToModify.model === 'string' && !bodyToModify.model.startsWith('google/')) {
+					bodyToModify.model = `google/${bodyToModify.model}`;
+				}
+				if (bodyToModify.reasoning_effort === 'none') {
+					delete bodyToModify.reasoning_effort;
+				}
+				bodyToModify.google = {
+					...(bodyToModify.google || {}),
+					safety_settings: [
+						{ "category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF" },
+						{ "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF" },
+						{ "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF" },
+						{ "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF" },
+					]
+				};
+				// --- 结束修改 Body 内容 ---
+				return JSON.stringify(bodyToModify); // 返回修改后的 JSON 字符串
+			} catch (e) {
+				console.error("Vertex body modification error:", e);
+				const message = e instanceof Error ? e.message : "Failed to modify Vertex AI request body";
+				throw new Response(message, { status: 500 }); // 内部处理错误
 			}
-			// 检查并删除顶层的 reasoning_effort (vertex不支持none参数，如果有需要移除避免报错)
-			if (body.reasoning_effort === 'none') {
-				delete body.reasoning_effort;
-			}
-			body.google = {
-				...(body.google || {}),
-				safety_settings: [
-					{ "category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF" },
-					{ "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF" },
-					{ "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF" },
-					{ "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF" },
-				]
-			};
-			// --- 结束修改 Body 内容 ---
-			return JSON.stringify(body); // 返回修改后的 JSON 字符串
-
-		} catch (e) {
-			// 处理解析错误或上面抛出的 Error
-			console.error("Vertex body processing error:", e);
-			// 解析或处理失败，无法继续，抛出错误或返回特定响应
-			const message = e instanceof Error ? e.message : "Failed to process Vertex AI request body";
-			throw new Response(message, { status: 400 });
+		}
+		// 如果 Body 未被预解析，则直接返回原始 Body 流
+		else {
+			// console.log("Vertex: Body not pre-parsed, returning original stream.");
+			return ctx.originalRequest.body;
 		}
 	}
 }
@@ -469,8 +463,25 @@ class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 	}
 
 	async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null | ReadableStream> {
-		// 直接透传原始请求的 Body 流
-		return ctx.originalRequest.body;
+		// 优先处理无 Body 的请求
+		if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD' || !ctx.originalRequest.body) {
+			return null;
+		}
+		// 如果 Body 已经被预解析，返回 JSON 字符串
+		if (ctx.parsedBody !== undefined && ctx.parsedBody !== null) {
+			// console.log("Gemini OpenAI: Returning pre-parsed body as JSON string.");
+			try {
+				return JSON.stringify(ctx.parsedBody);
+			} catch (e) {
+				console.error("Gemini OpenAI: Failed to stringify pre-parsed body:", e);
+				throw new Response("Failed to process pre-parsed request body", { status: 500 });
+			}
+		}
+		// 如果 Body 未被预解析，则返回原始 Body 流
+		else {
+			// console.log("Gemini OpenAI: Body not pre-parsed, returning original stream.");
+			return ctx.originalRequest.body;
+		}
 	}
 
 	async handleResponse(response: Response, ctx: StrategyContext): Promise<Response> {
@@ -583,8 +594,25 @@ class GeminiNativeStrategy implements RequestHandlerStrategy {
 	}
 
 	async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null | ReadableStream> {
-		// 直接透传原始请求的 Body 流
-		return ctx.originalRequest.body;
+		// 优先处理无 Body 的请求
+		if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD' || !ctx.originalRequest.body) {
+			return null;
+		}
+		// 如果 Body 已经被预解析，返回 JSON 字符串
+		if (ctx.parsedBody !== undefined && ctx.parsedBody !== null) {
+			// console.log("Gemini Native: Returning pre-parsed body as JSON string.");
+			try {
+				return JSON.stringify(ctx.parsedBody);
+			} catch (e) {
+				console.error("Gemini Native: Failed to stringify pre-parsed body:", e);
+				throw new Response("Failed to process pre-parsed request body", { status: 500 });
+			}
+		}
+		// 如果 Body 未被预解析，则返回原始 Body 流
+		else {
+			// console.log("Gemini Native: Body not pre-parsed, returning original stream.");
+			return ctx.originalRequest.body;
+		}
 	}
 }
 
@@ -625,8 +653,25 @@ class GenericProxyStrategy implements RequestHandlerStrategy {
 	}
 
 	async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null | ReadableStream> {
-		   // 直接透传原始请求的 Body 流
-		return ctx.originalRequest.body;
+		// 优先处理无 Body 的请求
+		if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD' || !ctx.originalRequest.body) {
+			return null;
+		}
+		// 如果 Body 已经被预解析，返回 JSON 字符串 (虽然通用代理通常不预解析，但保持一致性)
+		if (ctx.parsedBody !== undefined && ctx.parsedBody !== null) {
+			// console.log("Generic Proxy: Returning pre-parsed body as JSON string.");
+			try {
+				return JSON.stringify(ctx.parsedBody);
+			} catch (e) {
+				console.error("Generic Proxy: Failed to stringify pre-parsed body:", e);
+				throw new Response("Failed to process pre-parsed request body", { status: 500 });
+			}
+		}
+		// 如果 Body 未被预解析，则返回原始 Body 流
+		else {
+			// console.log("Generic Proxy: Body not pre-parsed, returning original stream.");
+			return ctx.originalRequest.body;
+		}
 	}
 }
 
