@@ -156,10 +156,21 @@ const getGcpAuth = async (): Promise<{ token: string; projectId: string } | null
 	try {
 		// 2. 计算凭证索引 (使用 KV 原子计数器)
 		const kv = await openKv(); // KV 仍然需要用于原子计数器
+
+		// --- 开始计时 KV commit ---
+		console.time("[Debug] KV Atomic Commit");
 		const atomicIncRes = await kv.atomic().sum(GCP_CREDENTIAL_ATOMIC_INDEX_KEY, 1n).commit();
+		// --- 结束计时 KV commit ---
+		console.timeEnd("[Debug] KV Atomic Commit");
+
 		if (!atomicIncRes.ok) throw new Error("KV atomic increment failed");
 
+		// --- 开始计时 KV get ---
+		console.time("[Debug] KV Get Count");
 		const currentCountEntry = await kv.get<Deno.KvU64>(GCP_CREDENTIAL_ATOMIC_INDEX_KEY);
+		// --- 结束计时 KV get ---
+		console.timeEnd("[Debug] KV Get Count");
+
 		if (currentCountEntry.value === null) throw new Error("KV get count failed");
 
 		const count = currentCountEntry.value.value;
