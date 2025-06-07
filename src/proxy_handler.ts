@@ -17,7 +17,7 @@ import {
 import { globalCache, CACHE_KEYS } from "./cache.ts";
 
 // Define GcpTokenCacheEntry and TTL locally as they were removed from cache.ts
-const GCP_TOKEN_CACHE_TTL = 55 * 60 * 1000; // 55 minutes
+const GCP_TOKEN_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 interface GcpTokenCacheEntry {
 	token: string;
 	projectId: string;
@@ -100,7 +100,7 @@ const _tryGetFirstGcpToken = async (): Promise<{ token: string; projectId: strin
 
 	const kv = await openKv();
 	const cacheKey = ["gcp_token_cache", 0]; // 缓存键固定为索引 0
-	const cacheTTL = 60000; // 1 分钟 (毫秒)
+	const cacheTTL = 5 * 60 * 1000; // 5 分钟 (毫秒)
 
 	try {
 		// 1. 尝试从 KV 缓存读取
