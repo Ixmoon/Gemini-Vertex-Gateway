@@ -96,138 +96,139 @@ export async function setEdgeCacheValue(cacheKey: string, value: any, ttlSeconds
 }
 
 /**
- * [核心] 从 Edge Cache 获取配置值，并在未命中时尝试从 KV 加载 (Lazy Loading / Cache-Aside)
+ * [核心] 从 Edge Cache 获取配置值，实现 Cache-Aside 模式
+ * 1. 尝试读取 Edge Cache
+ * 2. 缓存命中且有效 -> 返回缓存值
+ * 3. 缓存未命中或无效 -> 尝试读取 Deno KV
+ * 4. KV 命中且有效 -> 写入缓存，返回 KV 值
+ * 5. KV 未命中或无效 -> 使用硬编码默认值，写入缓存，返回默认值
+ * 6. 任何步骤出错 -> 安全回退到硬编码默认值
+ *
  * @param cacheKey 缓存键 (string)
- * @param defaultValue 默认值
- * @returns 解析后的值或默认值
+ * @param _defaultValue 硬编码的默认值 (仅用于类型提示和最终回退)
+ * @returns 解析后的值或最终的硬编码默认值
  */
-export async function getConfigValue<T>(cacheKey: string, defaultValue: T): Promise<T> {
+export async function getConfigValue<T>(cacheKey: string, _defaultValue: T): Promise<T> {
+	const hardcodedDefaultValue = DEFAULT_VALUES[cacheKey] as T; // 获取此键的最终后备默认值
+
+	// 1. 尝试从 Edge Cache 获取
+	let cachedData: T | undefined = undefined;
+	let isCacheValid = false;
 	try {
 		const cache = await getEdgeCache();
 		const request = new Request(`http://cache.internal/${encodeURIComponent(cacheKey)}`);
 		const cachedResponse = await cache.match(request);
 
 		if (cachedResponse) {
-			// Cache Hit
-			console.log(`[getConfigValue:${cacheKey}] Cache Hit.`); // DEBUG LOG
-			try {
-				const contentType = cachedResponse.headers.get('content-type');
-				console.log(`[getConfigValue:${cacheKey}] Cached Content-Type: ${contentType}`); // DEBUG LOG
-				if (!contentType || !contentType.includes('application/json')) {
-					console.warn(`Cache data for key "${cacheKey}" is not JSON. Falling back to default, will attempt KV fetch.`);
-					// 不直接返回，继续尝试 KV
-				} else {
-					const text = await cachedResponse.text();
-					if (text === 'null' && defaultValue === null) {
-						console.log(`[getConfigValue:${cacheKey}] Cached value is 'null' string and defaultValue is null. Returning null.`); // DEBUG LOG
-						return null as T; // 正确处理存储的 null 值
-					}
-					if (!text && defaultValue !== null) { // 处理空字符串响应体, 但如果默认值是 null 则允许
-						console.warn(`[getConfigValue:${cacheKey}] Cache data is empty string, but defaultValue is not null. Falling back to KV fetch.`); // DEBUG LOG
-						console.warn(`Cache data for key "${cacheKey}" is empty. Falling back to default, will attempt KV fetch.`);
-						// 不直接返回，继续尝试 KV
-					} else {
-						const data = JSON.parse(text || 'null'); // 处理空文本情况，解析为 null
-						console.log(`[getConfigValue:${cacheKey}] Parsed cached data:`, data, `(Type: ${typeof data}, IsArray: ${Array.isArray(data)})`); // DEBUG LOG
-						console.log(`[getConfigValue:${cacheKey}] Default value:`, defaultValue, `(Type: ${typeof defaultValue}, IsArray: ${Array.isArray(defaultValue)})`); // DEBUG LOG
-
-						return data as T; // 移除类型检查，直接返回解析结果
-					}
+			console.log(`[getConfigValue:${cacheKey}] Cache Hit.`);
+			const contentType = cachedResponse.headers.get('content-type');
+			if (contentType && contentType.includes('application/json')) {
+				const text = await cachedResponse.text();
+				// 尝试解析，即使是 'null' 或空字符串
+				try {
+					cachedData = JSON.parse(text || 'null'); // 空字符串解析为 null
+					isCacheValid = true; // 成功解析 JSON 即视为有效
+					console.log(`[getConfigValue:${cacheKey}] Parsed cached data:`, cachedData, `(Type: ${typeof cachedData})`);
+				} catch (parseError) {
+					console.error(`[getConfigValue:${cacheKey}] Error parsing JSON from Edge Cache:`, parseError);
+					// 解析失败，视为缓存无效
 				}
-			} catch (parseError) {
-				console.error(`[getConfigValue:${cacheKey}] Error parsing JSON from Edge Cache:`, parseError); // DEBUG LOG
-				console.error(`Error parsing JSON from Edge Cache for key "${cacheKey}":`, parseError);
-				// 解析失败，继续尝试 KV
+			} else {
+				console.warn(`[getConfigValue:${cacheKey}] Cached data is not JSON (Content-Type: ${contentType}). Cache considered invalid.`);
 			}
 		} else {
-				console.log(`[getConfigValue:${cacheKey}] Cache Miss.`); // DEBUG LOG
+			console.log(`[getConfigValue:${cacheKey}] Cache Miss.`);
 		}
+	} catch (cacheError) {
+		console.error(`[getConfigValue:${cacheKey}] Error accessing Edge Cache:`, cacheError);
+		// 访问缓存出错，继续尝试 KV
+	}
 
-		// Cache Miss or Cache Read Error: Attempt to fetch from KV
-		console.log(`[getConfigValue:${cacheKey}] Attempting to fetch from KV...`); // DEBUG LOG
-		console.log(`Edge Cache: Miss or error for key "${cacheKey}". Attempting to fetch from KV...`);
-		try {
-			const kv = await ensureKv(); // Ensure KV is open
-			// 重要：KV 键是数组形式，从 cacheKey 字符串转换
-			const kvKeyArray = cacheKey.split('_'); // 假设 cacheKey 由 KV 键数组 join('_') 组成
-			if (kvKeyArray.length === 0 || kvKeyArray.some(k => typeof k !== 'string')) {
-				console.error(`Invalid cacheKey format for KV lookup: "${cacheKey}". Cannot convert to Deno.KvKey.`);
-				return defaultValue; // 无法转换 key，返回默认值
-			}
-			const kvKey: Deno.KvKey = kvKeyArray;
+	// 2. 缓存命中且有效 -> 直接返回
+	if (isCacheValid && cachedData !== undefined) {
+		console.log(`[getConfigValue:${cacheKey}] Returning valid data from cache.`);
+		// 注意：这里需要进行类型断言，因为 cachedData 的类型可能与 T 不完全匹配
+		// 但由于我们信任缓存中的有效 JSON，这里暂时接受它
+		// 可以在返回前添加更严格的类型检查，但这会增加复杂性
+		return cachedData as T;
+	}
 
-			const result = await kv.get<any>(kvKey);
-			console.log(`[getConfigValue:${cacheKey}] KV get result:`, { versionstamp: result?.versionstamp, value: result?.value }); // DEBUG LOG (Log value separately if large)
-			let kvValue = result?.value ?? DEFAULT_VALUES[cacheKey]; // Use default value if KV is null/undefined
-			console.log(`[getConfigValue:${cacheKey}] Initial kvValue (after default check):`, kvValue, `(Type: ${typeof kvValue})`); // DEBUG LOG
+	// 3. 缓存未命中或无效 -> 尝试读取 Deno KV
+	console.log(`[getConfigValue:${cacheKey}] Proceeding to fetch from KV (due to cache miss or invalid cache).`);
+	let valueFromKv: T | undefined = undefined;
+	let isKvValid = false;
+	try {
+		const kv = await ensureKv();
+		const kvKeyArray = cacheKey.split('_');
+		if (kvKeyArray.length === 0 || kvKeyArray.some(k => typeof k !== 'string')) {
+			throw new Error(`Invalid cacheKey format for KV lookup: "${cacheKey}"`);
+		}
+		const kvKey: Deno.KvKey = kvKeyArray;
+		const kvResult = await kv.get<any>(kvKey);
+		console.log(`[getConfigValue:${cacheKey}] KV get result:`, { versionstamp: kvResult?.versionstamp, valueExists: kvResult?.value !== null && kvResult?.value !== undefined });
 
-			// Apply the same special validation/handling logic as in load/reload functions
-			console.log(`[getConfigValue:${cacheKey}] Applying KV validation rules...`); // DEBUG LOG
+		// 4. KV 命中 -> 验证并处理
+		if (kvResult.value !== null && kvResult.value !== undefined) {
+			let potentialValue = kvResult.value;
+			console.log(`[getConfigValue:${cacheKey}] Raw KV value:`, potentialValue, `(Type: ${typeof potentialValue})`);
+
+			// --- 应用特殊验证/处理逻辑 ---
+			let validationPassed = true;
 			if (
 				[CACHE_KEYS.TRIGGER_KEYS, CACHE_KEYS.POOL_KEYS, CACHE_KEYS.FALLBACK_MODELS, CACHE_KEYS.VERTEX_MODELS].includes(cacheKey) &&
-				!Array.isArray(kvValue)
+				!Array.isArray(potentialValue)
 			) {
-				console.warn(`KV value for ${cacheKey} was not an array, using default []`);
-				kvValue = DEFAULT_VALUES[cacheKey];
+				console.warn(`KV value for ${cacheKey} is not an array. Validation failed.`);
+				validationPassed = false;
 			}
-			if (cacheKey === CACHE_KEYS.API_MAPPINGS && (typeof kvValue !== 'object' || kvValue === null || Array.isArray(kvValue))) {
-				console.warn(`KV value for ${cacheKey} was not a valid object, using default {}`);
-				kvValue = DEFAULT_VALUES[cacheKey];
+			if (cacheKey === CACHE_KEYS.API_MAPPINGS && (typeof potentialValue !== 'object' || potentialValue === null || Array.isArray(potentialValue))) {
+				console.warn(`KV value for ${cacheKey} is not a valid object. Validation failed.`);
+				validationPassed = false;
 			}
 			if (cacheKey === CACHE_KEYS.API_RETRY_LIMIT) {
-				if (typeof kvValue !== 'number' || !Number.isInteger(kvValue) || kvValue < 1) {
-					console.warn(`KV value for ${cacheKey} was invalid (${kvValue}), using default ${DEFAULT_VALUES[cacheKey]}`);
-					kvValue = DEFAULT_VALUES[cacheKey];
+				if (typeof potentialValue !== 'number' || !Number.isInteger(potentialValue) || potentialValue < 1) {
+					console.warn(`KV value for ${cacheKey} is not a valid positive integer (${potentialValue}). Validation failed.`);
+					validationPassed = false;
 				}
 			}
-			// GCP Credentials String doesn't need special handling here.
+			// --- 结束特殊处理 ---
 
-			// Write the fetched (and validated) value back to Edge Cache
-			// Do this even if it's the default value, to cache the "miss" result from KV
-			console.log(`[getConfigValue:${cacheKey}] Final kvValue after validation:`, kvValue, `(Type: ${typeof kvValue})`); // DEBUG LOG
-			console.log(`[getConfigValue:${cacheKey}] Caching this value to Edge Cache.`); // DEBUG LOG
-			console.log(`KV Fetch: Fetched value for "${cacheKey}". Caching it to Edge Cache.`);
-			// 使用 await 写入缓存，确保操作完成
-			// 移除不正确的 Deno.unstable_kv 调用
-			try {
-				await setEdgeCacheValue(cacheKey, kvValue); // Use default TTL (infinite)
-			} catch (cacheWriteError) {
-				// 记录缓存写入错误，但不影响返回 KV 值
-				console.error(`Failed to write KV value back to Edge Cache for key "${cacheKey}":`, cacheWriteError);
-			}
-
-			// Return the value fetched from KV (or the default if KV was empty)
-			// Perform one last type check against the original defaultValue requested
-			console.log(`[getConfigValue:${cacheKey}] Performing final type check before returning KV value.`); // DEBUG LOG
-			if (typeof kvValue === typeof defaultValue || (kvValue === null && defaultValue === null)) {
-					console.log(`[getConfigValue:${cacheKey}] Final type check passed (basic/null). Returning KV value.`); // DEBUG LOG
-					return kvValue as T;
-			} else if (Array.isArray(defaultValue) && Array.isArray(kvValue)) {
-					console.log(`[getConfigValue:${cacheKey}] Final type check passed (array). Returning KV value.`); // DEBUG LOG
-					return kvValue as T;
-			} else if (typeof defaultValue === 'object' && defaultValue !== null && !Array.isArray(defaultValue) &&
-					   typeof kvValue === 'object' && kvValue !== null && !Array.isArray(kvValue)) {
-					console.log(`[getConfigValue:${cacheKey}] Final type check passed (object). Returning KV value.`); // DEBUG LOG
-					return kvValue as T;
+			if (validationPassed) {
+				valueFromKv = potentialValue as T;
+				isKvValid = true;
+				console.log(`[getConfigValue:${cacheKey}] KV value passed validation.`);
 			} else {
-					console.warn(`[getConfigValue:${cacheKey}] Final type check failed. KV value type (${typeof kvValue}) doesn't match expected default type (${typeof defaultValue}). Falling back to original default.`); // DEBUG LOG
-					console.warn(`KV value type mismatch for key "${cacheKey}" after fetch. Expected ${typeof defaultValue}, got ${typeof kvValue}. Falling back to original default.`);
-					return defaultValue; // Final fallback
+				console.warn(`[getConfigValue:${cacheKey}] KV value failed validation. Will use hardcoded default.`);
 			}
-
-		} catch (kvError) {
-			console.error(`[getConfigValue:${cacheKey}] Error during KV fetch/processing:`, kvError); // DEBUG LOG
-			console.error(`Error fetching or processing KV value for key "${cacheKey}":`, kvError);
-			// Fallback to the original default value if KV interaction fails
-			return defaultValue;
+		} else {
+			console.log(`[getConfigValue:${cacheKey}] KV value is null or undefined.`);
 		}
-
-	} catch (cacheError) {
-		console.error(`[getConfigValue:${cacheKey}] Error accessing Edge Cache:`, cacheError); // DEBUG LOG
-		console.error(`Error accessing Edge Cache for key "${cacheKey}":`, cacheError);
-		// Fallback to default if Edge Cache access fails initially
-		return defaultValue;
+	} catch (kvError) {
+		console.error(`[getConfigValue:${cacheKey}] Error fetching or processing KV value:`, kvError);
+		// KV 访问或处理出错，将使用硬编码默认值
 	}
+
+	// 5. 决定最终使用的值并写入缓存
+	let finalValue: T;
+	if (isKvValid && valueFromKv !== undefined) {
+		finalValue = valueFromKv;
+		console.log(`[getConfigValue:${cacheKey}] Using validated value from KV.`);
+	} else {
+		finalValue = hardcodedDefaultValue; // 使用硬编码默认值
+		console.log(`[getConfigValue:${cacheKey}] Using hardcoded default value.`);
+	}
+
+	// 写入缓存（无论是来自 KV 的有效值还是硬编码默认值）
+	try {
+		console.log(`[getConfigValue:${cacheKey}] Caching final value:`, finalValue, `(Type: ${typeof finalValue})`);
+		await setEdgeCacheValue(cacheKey, finalValue); // 默认永不过期
+	} catch (cacheWriteError) {
+		console.error(`[getConfigValue:${cacheKey}] Failed to write final value back to Edge Cache:`, cacheWriteError);
+		// 缓存写入失败不应阻止返回结果
+	}
+
+	// 6. 返回最终值
+	return finalValue;
 }
 
 

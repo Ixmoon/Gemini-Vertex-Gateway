@@ -6,8 +6,8 @@ import { serveStatic } from "hono/middleware";
 import * as kvOps from "./replacekeys.ts"; // Keep existing kvOps import for other functions
 // --- 导入新的代理处理模块 ---
 import { handleGenericProxy } from "./proxy_handler.ts";
-// 移除旧的缓存初始化函数导入
-// import { loadAndCacheAllKvConfigs, initializeAndCacheGcpAuth } from "./cache.ts";
+// --- 导入缓存加载函数 ---
+import { loadAndCacheAllKvConfigs } from "./cache.ts"; // <--- 导入函数
 
 // --- 辅助函数 (非代理相关) (保持不变) ---
 /** 创建 JSON 错误响应 */
@@ -128,10 +128,27 @@ if (portFromEnv) {
 	} catch (e) { /* Ignore parse error */ }
 }
 
-// [重构] 移除启动时的缓存预加载逻辑
-// 只需确保 KV 打开即可 (Lazy loading, removed openKv() call here)
-// await kvOps.openKv(); // Removed this line
-console.log("KV will be opened lazily when needed.");
+// --- 确保 KV 在启动时打开 ---
+console.log("Ensuring KV store is open for startup operations...");
+try {
+await kvOps.openKv(); // <--- 重新添加显式打开 KV
+console.log("KV opened successfully.");
+} catch (kvError) {
+console.error("FATAL: Failed to open KV store during startup:", kvError);
+// 也许应该在这里退出？取决于需求
+throw new Error("Failed to initialize KV store."); // 抛出错误阻止启动
+}
+
+// --- [临时补救措施] 强制刷新所有配置到 Edge Cache ---
+console.log("[TEMP] Forcing refresh of all KV configs into Edge Cache at startup...");
+try {
+await loadAndCacheAllKvConfigs(); // <--- 调用缓存刷新函数
+console.log("[TEMP] Force refresh completed successfully.");
+} catch (refreshError) {
+console.error("[TEMP] Error during forced cache refresh:", refreshError);
+console.warn("[TEMP] Server starting with potentially stale or default cache due to refresh error.");
+}
+// --- 结束临时补救措施 ---
 
 // try {
 // 	console.log("Starting KV config preloading...");
