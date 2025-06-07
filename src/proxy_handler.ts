@@ -731,6 +731,8 @@ const getStrategy = (type: RequestType): RequestHandlerStrategy => {
 
 // === 主处理函数  ===
 export const handleGenericProxy = async (c: Context): Promise<Response> => {
+	const requestStartTime = performance.now(); // <-- 计时起点
+	console.log(`[Debug] Request received for ${c.req.url} at ${new Date().toISOString()}`); // 添加日志确认请求入口
 
 	const req = c.req.raw;
 	const url = new URL(req.url);
@@ -791,6 +793,10 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 			const targetBody = await strategy.processRequestBody(strategyContext);
 
 			// 5. 执行 Fetch
+			const fetchStartTime = performance.now(); // <-- 计时终点
+			const timeBeforeFetch = fetchStartTime - requestStartTime;
+			console.log(`[Debug] Time before fetch (Attempt ${attempts}, Type: ${RequestType[type]}): ${timeBeforeFetch.toFixed(2)} ms for ${url.pathname}`); // <-- 打印时间差
+
 			const res = await fetch(targetUrl, {
 				method: req.method,
 				headers: targetHeaders,
