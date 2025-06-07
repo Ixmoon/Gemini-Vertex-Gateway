@@ -16,15 +16,9 @@ import {
 } from "./replacekeys.ts";
 // --- 导入新的代理处理模块 ---
 // Remove apiMapping import as it's no longer exported/used from proxy_handler
-// Import caching functions
-import {
-	handleGenericProxy,
-	loadAndCacheGcpCreds, // Use cached loader
-	invalidateGcpCredsCache // Import invalidation function
-} from "./proxy_handler.ts";
-// Import cache invalidation for mappings (assuming it's added to replacekeys.ts)
-// Note: Need to add invalidateApiMappingsCache to replacekeys.ts if not already present
-// import { invalidateApiMappingsCache } from "./replacekeys.ts"; // No longer needed, handled by reloadKvConfig in setters
+import { handleGenericProxy } from "./proxy_handler.ts";
+// Import cache functions
+import { loadAndCacheAllKvConfigs, initializeAndCacheGcpAuth } from "./cache.ts";
 
 // --- 辅助函数 (非代理相关) ---
 /** 创建 JSON 错误响应 */
@@ -202,11 +196,11 @@ manageApi.post('/retry-limit', async (c) => {
 manageApi.post('/gcp-credentials', async (c) => {
 	const { credentials } = await c.req.json();
 	return handleManageApiCall(async () => {
+		// Cache invalidation/reloading is handled internally by setGcpCredentialsString now
 		await kvOps.setGcpCredentialsString(credentials ?? null);
-		invalidateGcpCredsCache(); // Invalidate cache on successful update
 	}, "GCP credentials updated.", "Failed to set GCP credentials");
-});
-manageApi.get('/gcp-credentials', (c) => handleManageApiCall(
+	});
+	manageApi.get('/gcp-credentials', (c) => handleManageApiCall(
 	async () => ({ credentials: await kvOps.getGcpCredentialsString() }), // 假设 kvOps 中有此函数
 	() => "GCP credentials fetched successfully.",
 	"Failed to get GCP credentials"
@@ -319,7 +313,11 @@ if (portFromEnv) { // 检查是否存在
 
 // 在启动前初始化 KV 和加载/缓存 GCP 凭证 (使用导入的函数)
 await kvOps.openKv();
-await loadAndCacheGcpCreds(); // 加载并缓存 GCP 凭证
+console.log("KV opened.");
+await loadAndCacheAllKvConfigs(); // Preload all KV configs into cache
+console.log("KV configs cached.");
+await initializeAndCacheGcpAuth(); // Initialize GCP Auth instances based on cached creds
+console.log("GCP Auth initialized and cached.");
 
 // 启动服务器
 Deno.serve({ port }, app.fetch);
