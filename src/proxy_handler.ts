@@ -477,10 +477,11 @@ class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 				throw new Response("Failed to process pre-parsed request body", { status: 500 });
 			}
 		}
-		// 如果 Body 未被预解析，则返回原始 Body 流
+		// 如果 Body 未被预解析，则返回原始 Body 流的一个克隆 (使用 tee)
 		else {
-			// console.log("Gemini OpenAI: Body not pre-parsed, returning original stream.");
-			return ctx.originalRequest.body;
+			// console.log("Gemini OpenAI: Body not pre-parsed, returning teed stream.");
+			const [stream1, _stream2] = ctx.originalRequest.body.tee();
+			return stream1;
 		}
 	}
 
@@ -608,10 +609,11 @@ class GeminiNativeStrategy implements RequestHandlerStrategy {
 				throw new Response("Failed to process pre-parsed request body", { status: 500 });
 			}
 		}
-		// 如果 Body 未被预解析，则返回原始 Body 流
+		// 如果 Body 未被预解析，则返回原始 Body 流的一个克隆 (使用 tee)
 		else {
-			// console.log("Gemini Native: Body not pre-parsed, returning original stream.");
-			return ctx.originalRequest.body;
+			// console.log("Gemini Native: Body not pre-parsed, returning teed stream.");
+			const [stream1, _stream2] = ctx.originalRequest.body.tee();
+			return stream1;
 		}
 	}
 }
@@ -667,10 +669,11 @@ class GenericProxyStrategy implements RequestHandlerStrategy {
 				throw new Response("Failed to process pre-parsed request body", { status: 500 });
 			}
 		}
-		// 如果 Body 未被预解析，则返回原始 Body 流
+		// 如果 Body 未被预解析，则返回原始 Body 流的一个克隆 (使用 tee)
 		else {
-			// console.log("Generic Proxy: Body not pre-parsed, returning original stream.");
-			return ctx.originalRequest.body;
+			// console.log("Generic Proxy: Body not pre-parsed, returning teed stream.");
+			const [stream1, _stream2] = ctx.originalRequest.body.tee();
+			return stream1;
 		}
 	}
 }
