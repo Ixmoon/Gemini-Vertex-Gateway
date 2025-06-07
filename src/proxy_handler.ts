@@ -50,6 +50,7 @@ interface StrategyContext {
 	path: string;			   // 不含 prefix 的路径
 	prefix: string | null;	  // API 前缀 (如 /gemini)
 	parsedBody?: any | null;	// 预解析的 Body (由 determineRequestType 提供)
+	originalBodyBuffer?: ArrayBuffer | null; // 预读取的原始请求体缓冲区
 }
 
 // === 全局状态 ===
@@ -330,9 +331,9 @@ class VertexAIStrategy implements RequestHandlerStrategy {
 		return headers;
 	}
 
-	async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null | ReadableStream> {
-		// 优先处理无 Body 的请求
-		if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD' || !ctx.originalRequest.body) {
+	async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null> { // 返回类型不再是 ReadableStream
+		// 优先处理无 Body 的请求或已预解析的 Body
+		if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD') {
 			return null;
 		}
 
@@ -342,14 +343,16 @@ class VertexAIStrategy implements RequestHandlerStrategy {
 		if (ctx.parsedBody !== undefined && ctx.parsedBody !== null) {
 			// console.log("Vertex: Using pre-parsed body.");
 			bodyToModify = ctx.parsedBody;
-		} else {
+		} else if (ctx.originalBodyBuffer) { // 如果有预读取的 buffer
 			try {
-				// 注意：这里消耗原始请求的 Body 流
-				bodyToModify = await ctx.originalRequest.json();
+				bodyToModify = JSON.parse(new TextDecoder().decode(ctx.originalBodyBuffer));
 			} catch (e) {
-				console.error("Vertex: Failed to parse original request body:", e);
+				console.error("Vertex: Failed to parse original request body from buffer:", e);
 				throw new Response("Failed to parse request body for Vertex AI", { status: 400 });
 			}
+		} else { // 既没有 parsedBody 也没有 originalBodyBuffer (应该不会发生，除非请求无 body 但方法不是 GET/HEAD)
+			console.warn("Vertex: No body or parsed body found for non-GET/HEAD request.");
+			return null;
 		}
 
 		// 确保 body 是一个对象
@@ -444,9 +447,9 @@ class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 		return headers;
 	}
 
-	async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null | ReadableStream> {
+	async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null> { // 返回类型不再是 ReadableStream
 		// 优先处理无 Body 的请求
-		if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD' || !ctx.originalRequest.body) {
+		if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD') {
 			return null;
 		}
 
@@ -459,11 +462,12 @@ class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 				console.error("Gemini OpenAI: Failed to stringify pre-parsed body:", e);
 				throw new Response("Failed to process pre-parsed request body", { status: 500 });
 			}
-		}
-		// 如果 Body 未被预解析，则直接返回原始 Body 流
-		else {
-			// console.log("Gemini OpenAI: Body not pre-parsed, returning original stream.");
-			return ctx.originalRequest.body;
+		} else if (ctx.originalBodyBuffer) { // 如果有预读取的 buffer
+			// console.log("Gemini OpenAI: Recreating body from buffer.");
+			return new TextDecoder().decode(ctx.originalBodyBuffer); // 返回字符串
+		} else {
+			console.warn("Gemini OpenAI: No body or parsed body found for non-GET/HEAD request.");
+			return null;
 		}
 	}
 
@@ -570,9 +574,9 @@ class GeminiNativeStrategy implements RequestHandlerStrategy {
 		return headers;
 	}
 
-	async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null | ReadableStream> {
+	async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null> { // 返回类型不再是 ReadableStream
 		// 优先处理无 Body 的请求
-		if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD' || !ctx.originalRequest.body) {
+		if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD') {
 			return null;
 		}
 
@@ -586,11 +590,13 @@ class GeminiNativeStrategy implements RequestHandlerStrategy {
 				console.error("Gemini Native: Failed to stringify pre-parsed body:", e);
 				throw new Response("Failed to process pre-parsed request body", { status: 500 });
 			}
-		}
-		// 如果 Body 未被预解析，则直接返回原始 Body 流
-		else {
-			// console.log("Gemini Native: Body not pre-parsed, returning original stream.");
-			return ctx.originalRequest.body;
+		} else if (ctx.originalBodyBuffer) { // 如果有预读取的 buffer
+			// console.log("Gemini Native: Recreating body from buffer.");
+			// 对于原生 Gemini 请求，通常是 JSON body
+			return new TextDecoder().decode(ctx.originalBodyBuffer); // 返回字符串
+		} else {
+			console.warn("Gemini Native: No body or parsed body found for non-GET/HEAD request.");
+			return null;
 		}
 	}
 }
@@ -631,11 +637,21 @@ class GenericProxyStrategy implements RequestHandlerStrategy {
 		return buildBaseProxyHeaders(ctx.originalRequest.headers);
 	}
 
-	async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null | ReadableStream> {
-		// 通用代理总是透传原始 Body 流
-		return ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD'
-			? null
-			: ctx.originalRequest.body; // 直接返回原始流
+	async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null> { // 返回类型不再是 ReadableStream
+		// 优先处理无 Body 的请求
+		if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD') {
+			return null;
+		}
+
+		// 通用代理现在从预读取的 buffer 创建新的流
+		if (ctx.originalBodyBuffer) {
+			// console.log("Generic Proxy: Recreating body from buffer.");
+			// 对于通用代理，直接返回 ArrayBuffer
+			return ctx.originalBodyBuffer;
+		} else {
+			console.warn("Generic Proxy: No body buffer found for non-GET/HEAD request.");
+			return null;
+		}
 	}
 }
 
@@ -719,20 +735,36 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 	const req = c.req.raw;
 	const url = new URL(req.url);
 
+	// 预先读取原始请求的 body 为 ArrayBuffer，以便在重试时可以重复使用
+	// 对于 GET/HEAD 请求或没有 body 的请求，originalBodyBuffer 将为 null
+	let originalBodyBuffer: ArrayBuffer | null = null;
+	if (req.method !== 'GET' && req.method !== 'HEAD' && req.body) {
+		try {
+			// 克隆请求以读取 body，避免影响 determineRequestType 中的 body 读取
+			const clonedReqForBody = req.clone();
+			originalBodyBuffer = await clonedReqForBody.arrayBuffer();
+		} catch (e) {
+			console.error("Failed to read original request body into ArrayBuffer:", e);
+			return new Response("Internal Server Error: Failed to process request body.", { status: 500 });
+		}
+	}
+
 	// 判断类型并获取策略 (传入 Context), 同时获取可能的预解析 Body
+	// 注意：determineRequestType 可能会再次消耗 body，因此在它之前读取 bodyBuffer 是安全的
 	const { type, prefix, path, parsedBody } = await determineRequestType(c);
 	if (type === RequestType.UNKNOWN) {
 		return new Response("无效的API路径前缀", { status: 404 });
 	}
 	const strategy = getStrategy(type);
 
-	// 构建策略上下文 (传入原始请求和预解析的 Body)
+	// 构建策略上下文 (传入原始请求、预解析的 Body 和原始 Body Buffer)
 	const strategyContext: StrategyContext = {
 		originalUrl: url,
 		originalRequest: req, // 传递原始请求对象
 		path,
 		prefix,
-		parsedBody 
+		parsedBody,
+		originalBodyBuffer // 传递预读取的 body buffer
 	};
 
 	// 重试循环

@@ -120,12 +120,11 @@ console.log("KV opened.");
 
 // 并行加载配置和初始化 GCP Auth (使用导入的函数)
 try {
-	console.log("Starting parallel loading of KV configs and GCP Auth initialization...");
-	await Promise.all([
-		loadAndCacheAllKvConfigs(), // 预加载所有 KV 配置到缓存
-		initializeAndCacheGcpAuth()  // 基于缓存的凭证初始化 GCP Auth 实例 (会等待凭证缓存就绪)
-	]);
-	console.log("KV configs cached and GCP Auth initialized successfully.");
+	console.log("Starting KV config preloading...");
+	await loadAndCacheAllKvConfigs(); // 预加载所有 KV 配置到缓存
+	console.log("KV configs cached. Initializing GCP Auth instances...");
+	await initializeAndCacheGcpAuth();  // 基于缓存的凭证初始化 GCP Auth 实例
+	console.log("GCP Auth initialized successfully.");
 } catch (error) {
 	console.error("Error during parallel startup initialization:", error);
 	// 根据需要决定服务器是否仍应启动或退出
