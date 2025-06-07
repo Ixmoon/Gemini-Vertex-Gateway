@@ -4,36 +4,27 @@ import { GoogleAuth } from "https://esm.sh/google-auth-library";
 // 导入 kv 操作函数、类型和常量
 import {
 	openKv, // KV 实例操作
-	getGcpCredentialsString, // 获取 GCP 凭证字符串
-	getGcpDefaultLocation, // 获取 GCP 默认区域
-	getApiRetryLimit, // 获取 API 重试次数
+	// getGcpCredentialsString, // 由 cache.ts 处理
+	// getGcpDefaultLocation, // 由 cache.ts 处理
+	// getApiRetryLimit, // 由 cache.ts 处理
 	getApiKeyForRequest, // 获取请求的 API Key (核心逻辑)
 	isTriggerKey, // 检查是否为触发 Key
 	getNextPoolKey, // 获取下一个密钥池 Key
 	isVertexModel, // 检查是否为 Vertex 模型
 	ApiKeySource, // Key 来源类型
-	ApiKeyResult, // API Key 结果类型 <--- 补充导入
+	ApiKeyResult, // API Key 结果类型
 	GCP_CREDENTIAL_ATOMIC_INDEX_KEY, // GCP 凭证原子计数器 Key
-	getApiMappings, // 获取 API 路径映射
+	// getApiMappings, // 由 cache.ts 处理
+	parseCreds, // 需要解析凭证以获取 Project ID
+	GcpCredentials, // 需要凭证类型
 } from "./replacekeys.ts";
+// 导入缓存模块
+import { globalCache, CACHE_KEYS } from "./cache.ts";
 
 // === 类型定义 ===
 
-// Gcp凭证定义
-export interface GcpCredentials {
-	type: string;
-	project_id: string;
-	private_key_id: string;
-	private_key: string;
-	client_email: string;
-	client_id?: string;
-	auth_uri?: string;
-	token_uri?: string;
-	auth_provider_x509_cert_url?: string;
-	client_x509_cert_url?: string;
-	universe_domain?: string;
-	[key: string]: any;
-}
+// GcpCredentials 接口现在从 replacekeys.ts 导入
+// export interface GcpCredentials { ... } // 移除本地定义
 
 // 请求处理类型枚举
 enum RequestType {
@@ -98,43 +89,21 @@ const isValidCred = (cred: any): cred is GcpCredentials =>
 	cred?.private_key &&
 	cred?.client_email;
 
-const parseCreds = (jsonStr: string): GcpCredentials[] => {
-	try {
-		const p = JSON.parse(jsonStr);
-		if (Array.isArray(p)) {
-			return p.filter(isValidCred);
-		}
-	} catch { /* 忽略第一个解析错误 */ }
+// parseCreds 已移至 replacekeys.ts 并从那里导入
+/*
+// parseCreds 函数已移至 replacekeys.ts 并从那里导入。此处的注释块已移除。
 
-	try {
-		let f = jsonStr.trim();
-		if (!f.startsWith('[')) {
-			f = `[${f.replace(/}\s*{/g, '},{')}]`;
-		}
-		const p = JSON.parse(f);
-		if (Array.isArray(p)) {
-			return p.filter(isValidCred);
-		}
-	} catch { /* 忽略第二个解析错误 */ }
+/** [内部][重构] 尝试获取第一个 GCP 凭证的 Token (优先读 KV 缓存, 1 分钟 TTL) - 从缓存读取 Auth 和 Creds */
+const _tryGetFirstGcpToken = async (): Promise<{ token: string; projectId: string } | null> => {
+	// 从缓存获取 Auth 实例和凭证字符串
+	const auths = globalCache.get<GoogleAuth[]>(CACHE_KEYS.GCP_AUTH_INSTANCES) || [];
+	const gcpCredsString = globalCache.get<string | null>(CACHE_KEYS.GCP_CREDENTIALS_STRING);
+	const creds = gcpCredsString ? parseCreds(gcpCredsString) : [];
 
-	return (jsonStr.match(/\{(?:[^{}]|{[^{}]*})*\}/g) || [])
-		.map(s => {
-			try {
-				const p = JSON.parse(s.trim());
-				return isValidCred(p) ? p : null;
-			} catch {
-				return null;
-			}
-		})
-		.filter(Boolean) as GcpCredentials[];
-};
-
-/** [内部][重构] 尝试获取第一个 GCP 凭证的 Token (优先读 KV 缓存, 1 分钟 TTL) */
-const _tryGetFirstGcpToken = async (
-	creds: GcpCredentials[],
-	auths: GoogleAuth[]
-): Promise<{ token: string; projectId: string } | null> => {
-	if (!auths.length || !creds.length) return null; // 确保凭证和认证对象存在
+	if (!auths.length || !creds.length) {
+		console.warn("_tryGetFirstGcpToken: No GCP Auth instances or credentials found in global cache.");
+		return null;
+	}
 
 	const kv = await openKv();
 	const cacheKey = ["gcp_token_cache", 0]; // 缓存键固定为索引 0
@@ -144,15 +113,16 @@ const _tryGetFirstGcpToken = async (
 		// 1. 尝试从 KV 缓存读取
 		const cachedEntry = await kv.get<{ token: string; projectId: string }>(cacheKey);
 		if (cachedEntry.value) {
-			// console.log("Fallback: Cache hit for index 0");
+			//// console.log("Fallback: Cache hit for index 0");
 			return cachedEntry.value;
 		}
 
 		// 2. 缓存未命中或过期，获取新 Token
-		// console.log("Fallback: Cache miss/expired for index 0. Fetching new token.");
+		//// console.log("Fallback: Cache miss/expired for index 0. Fetching new token.");
 		const newToken = await auths[0].getAccessToken();
 		if (newToken) {
-			const tokenData = { token: newToken, projectId: creds[0].project_id };
+			const projectId = creds[0].project_id; // 使用解析出的 creds 获取 projectId
+			const tokenData = { token: newToken, projectId: projectId };
 			// 3. 存入 KV 缓存 (异步，不阻塞返回)
 			kv.set(cacheKey, tokenData, { expireIn: cacheTTL }).catch(e => {
 				console.error("Fallback: Failed to set KV cache for index 0:", e);
@@ -168,61 +138,32 @@ const _tryGetFirstGcpToken = async (
 	}
 };
 
-// 全局缓存 GCP 凭证和认证对象
-let cachedGcpCreds: GcpCredentials[] = [];
-let cachedGcpAuths: GoogleAuth[] = [];
-let gcpCredsLoaded = false;
+// --- 移除旧的全局缓存变量和加载函数 ---
+// let cachedGcpCreds: GcpCredentials[] = []; // Removed
+// let cachedGcpAuths: GoogleAuth[] = []; // Removed
+// let gcpCredsLoaded = false; // Removed
+// export const loadAndCacheGcpCreds = ... // Removed
+// export const invalidateGcpCredsCache = ... // Removed
 
-/** [重构] 从 KV 加载并缓存 GCP 凭证 */
-export const loadAndCacheGcpCreds = async (): Promise<{ creds: GcpCredentials[]; auths: GoogleAuth[] }> => {
-	const jsonStr = await getGcpCredentialsString();
-	if (!jsonStr) {
-		cachedGcpCreds = [];
-		cachedGcpAuths = [];
-		gcpCredsLoaded = true;
-		return { creds: [], auths: [] };
-	}
-	try {
-		const creds = parseCreds(jsonStr);
-		const auths = creds.map(cred => new GoogleAuth({
-			credentials: cred,
-			scopes: ["https://www.googleapis.com/auth/cloud-platform"]
-		}));
-		cachedGcpCreds = creds;
-		cachedGcpAuths = auths;
-		gcpCredsLoaded = true;
-		return { creds, auths };
-	} catch (e) {
-		console.error("Failed to load/parse GCP creds:", e);
-		cachedGcpCreds = [];
-		cachedGcpAuths = [];
-		gcpCredsLoaded = true; // 标记为已尝试加载，即使失败
-		return { creds: [], auths: [] };
-	}
-};
-
-/** 清除 GCP 凭证缓存，强制下次重新加载 */
-export const invalidateGcpCredsCache = () => {
-	gcpCredsLoaded = false;
-	cachedGcpCreds = [];
-	cachedGcpAuths = [];
-	console.log("GCP credentials cache invalidated.");
-};
 
 // [重构] 使用全局缓存和原子计数器获取 GCP 认证信息 (优先读 KV Token 缓存, 1 分钟 TTL)
 const getGcpAuth = async (): Promise<{ token: string; projectId: string } | null> => {
-	// 1. 确保凭证已加载到缓存
-	if (!gcpCredsLoaded) {
-		await loadAndCacheGcpCreds();
-	}
-	// 使用全局缓存的 creds 和 auths
-	const creds = cachedGcpCreds;
-	const auths = cachedGcpAuths;
-
-	if (!auths.length) {
-		// console.warn("getGcpAuth called but no GCP credentials available in cache.");
+	// 1. 从全局缓存获取 Auth 实例
+	const auths = globalCache.get<GoogleAuth[]>(CACHE_KEYS.GCP_AUTH_INSTANCES) || [];
+	if (!auths || auths.length === 0) {
+		console.warn("getGcpAuth: No GCP Auth instances found in global cache.");
 		return null; // 没有可用凭证
 	}
+
+	// 2. 从全局缓存获取凭证字符串以解析 Project ID
+	const gcpCredsString = globalCache.get<string | null>(CACHE_KEYS.GCP_CREDENTIALS_STRING);
+	const creds = gcpCredsString ? parseCreds(gcpCredsString) : [];
+	if (!creds || creds.length === 0) {
+		// 这通常不应该发生，因为 Auth 实例是基于凭证创建的
+		console.warn("getGcpAuth: No GCP credentials found in global cache after parsing, despite having auth instances.");
+		// 即使没有 creds 来获取 project ID，仍然尝试获取 token 并回退
+	}
+
 
 	let calculatedIndex = -1; // 用于错误日志和回退
 	const cacheTTL = 60000; // 1 分钟 (毫秒)
@@ -243,20 +184,26 @@ const getGcpAuth = async (): Promise<{ token: string; projectId: string } | null
 		// 3. 尝试从 KV 缓存读取
 		const cachedEntry = await kv.get<{ token: string; projectId: string }>(cacheKey);
 		if (cachedEntry.value) {
-			// console.log(`Cache hit for index ${calculatedIndex}`);
+			//// console.log(`Cache hit for index ${calculatedIndex}`);
 			return cachedEntry.value;
 		}
 
 		// 4. 缓存未命中或过期，获取新 Token
-		// console.log(`Cache miss/expired for index ${calculatedIndex}. Fetching new token.`);
+		//// console.log(`Cache miss/expired for index ${calculatedIndex}. Fetching new token.`);
 		const newToken = await auths[calculatedIndex].getAccessToken();
 		if (!newToken) {
-			console.error(`GCP auth returned null token for atomic index ${calculatedIndex}`);
+			console.error(`GCP auth returned null token for atomic index ${calculatedIndex}.`);
 			throw new Error("GCP returned null token"); // 触发回退
 		}
 
 		// 5. 成功获取，存入 KV 缓存并返回
-		const tokenData = { token: newToken, projectId: creds[calculatedIndex].project_id };
+		// 从解析的 creds 获取 projectId
+		if (calculatedIndex < 0 || calculatedIndex >= creds.length) {
+			 console.error(`getGcpAuth: Calculated index ${calculatedIndex} is out of bounds for parsed credentials (length ${creds.length}) when creating token data.`);
+			 throw new Error("Credential index out of bounds"); // 触发回退
+		}
+		const projectId = creds[calculatedIndex].project_id;
+		const tokenData = { token: newToken, projectId: projectId };
 		// 异步写入缓存，不阻塞返回
 		kv.set(cacheKey, tokenData, { expireIn: cacheTTL }).catch(e => {
 			console.error(`Failed to set KV cache for index ${calculatedIndex}:`, e);
@@ -274,7 +221,8 @@ const getGcpAuth = async (): Promise<{ token: string; projectId: string } | null
 		// 6. 执行回退逻辑 (使用缓存的 creds 和 auths)
 		console.warn("Falling back to first GCP credential (index 0).");
 		// 回退逻辑现在优先检查索引 0 的缓存
-		return await _tryGetFirstGcpToken(creds, auths); // 传递缓存的凭证
+		// 回退逻辑不再需要传递参数
+		return await _tryGetFirstGcpToken();
 	}
 };
 
@@ -287,7 +235,8 @@ const _getGeminiAuthenticationDetails = async (
 	attempt: number,
 	strategyName: string // 用于日志/错误信息
 ): Promise<AuthenticationDetails> => {
-	const apiRetryLimit = await getApiRetryLimit();
+	// 从缓存读取
+	const apiRetryLimit = globalCache.get<number>(CACHE_KEYS.API_RETRY_LIMIT) ?? 3;
 	const userApiKey = getApiKey(c);
 
 	let keyResult: ApiKeyResult | null = null;
@@ -340,7 +289,8 @@ interface RequestHandlerStrategy {
 class VertexAIStrategy implements RequestHandlerStrategy {
 	async getAuthenticationDetails(_c: Context, _ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
 		// 获取全局重试限制
-		const apiRetryLimit = await getApiRetryLimit();
+		// 从缓存读取
+		const apiRetryLimit = globalCache.get<number>(CACHE_KEYS.API_RETRY_LIMIT) ?? 3;
 
 		// getGcpAuth 内部会确保凭证已加载
 
@@ -367,7 +317,8 @@ class VertexAIStrategy implements RequestHandlerStrategy {
 			// 内部逻辑错误，仍可抛出 Error
 			throw new Error("Vertex AI 需要 GCP Project ID");
 		}
-		const gcpDefaultLocation = await getGcpDefaultLocation(); // 按需获取, 移除 kvOps.
+		// 从缓存读取
+		const gcpDefaultLocation = globalCache.get<string>(CACHE_KEYS.GCP_DEFAULT_LOCATION) ?? 'global';
 		const host = gcpDefaultLocation === "global"
 			? "aiplatform.googleapis.com"
 			: `${gcpDefaultLocation}-aiplatform.googleapis.com`;
@@ -411,7 +362,7 @@ class VertexAIStrategy implements RequestHandlerStrategy {
 				// 如果没有预解析，则解析原始请求 Body
 				body = await ctx.originalRequest.json();
 			} else {
-				// console.log("Vertex: No body found");
+				//// console.log("Vertex: No body found");
 				return null; // 没有 Body 内容
 			}
 
@@ -458,15 +409,15 @@ class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 
 		// 优先使用预解析的 Body 中的 model
 		if (ctx.parsedBody && typeof ctx.parsedBody === 'object' && ctx.parsedBody !== null) {
-			   // console.log("Gemini OpenAI using pre-parsed body for model");
+			   //// console.log("Gemini OpenAI using pre-parsed body for model");
 			modelNameForKeyLookup = ctx.parsedBody.model ?? null;
 		}
 		// 如果没有预解析的 Body，并且请求可能有 Body，则尝试解析克隆的请求
 		else if (ctx.parsedBody === undefined && ctx.originalRequest.body && ctx.originalRequest.method !== 'GET' && ctx.originalRequest.method !== 'HEAD') {
 			try {
-				   // console.log("Gemini OpenAI parsing cloned request for model");
-				// 克隆请求以允许后续策略（processRequestBody）也能读取 body stream
-				const clonedRequest = ctx.originalRequest.clone();
+			    //// console.log("Gemini OpenAI parsing cloned request for model");
+			 // 克隆请求以允许后续策略（processRequestBody）也能读取 body stream
+			 const clonedRequest = ctx.originalRequest.clone();
 				const body = await clonedRequest.json();
 				modelNameForKeyLookup = body?.model ?? null;
 			} catch (e) {
@@ -480,7 +431,8 @@ class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 	}
 
 	async buildTargetUrl(ctx: StrategyContext, _authDetails: AuthenticationDetails): Promise<URL> { // <-- Mark as async
-		const apiMappings = await getApiMappings(); // 从 KV 加载映射
+		// 从缓存读取
+		const apiMappings = globalCache.get<Record<string, string>>(CACHE_KEYS.API_MAPPINGS) || {};
 		const baseUrl = apiMappings['/gemini']; // TODO: Consider if this specific mapping is still needed or should be dynamic
 		if (!baseUrl) {
 			// Handle case where '/gemini' prefix might not be in KV
@@ -568,22 +520,22 @@ class GeminiNativeStrategy implements RequestHandlerStrategy {
 		// 优先从路径获取模型名称
 		const match = ctx.path.match(/\/models\/([^:]+):/);
 		if (match && match[1]) {
-			   // console.log("Gemini Native using path for model");
+			   //// console.log("Gemini Native using path for model");
 			modelNameForKeyLookup = match[1];
 		}
 		// 如果路径中没有，则尝试从 Body 获取
 		else {
 			   // 优先使用预解析的 Body 中的 model
 			   if (ctx.parsedBody && typeof ctx.parsedBody === 'object' && ctx.parsedBody !== null) {
-				   // console.log("Gemini Native using pre-parsed body for model");
-				   modelNameForKeyLookup = ctx.parsedBody.model ?? null;
+			    //// console.log("Gemini Native using pre-parsed body for model");
+			    modelNameForKeyLookup = ctx.parsedBody.model ?? null;
 			   }
 			   // 如果没有预解析的 Body，并且请求可能有 Body，则尝试解析克隆的请求
 			   else if (ctx.parsedBody === undefined && ctx.originalRequest.body && ctx.originalRequest.method !== 'GET' && ctx.originalRequest.method !== 'HEAD') {
-				   try {
-					   // console.log("Gemini Native parsing cloned request for model");
-					   const clonedRequest = ctx.originalRequest.clone();
-					   const body = await clonedRequest.json();
+			    try {
+			     //// console.log("Gemini Native parsing cloned request for model");
+			     const clonedRequest = ctx.originalRequest.clone();
+			     const body = await clonedRequest.json();
 					   modelNameForKeyLookup = body?.model ?? null;
 				   } catch (e) {
 					   console.warn("Gemini Native getAuth: Failed to parse cloned body for model name:", e);
@@ -601,7 +553,8 @@ class GeminiNativeStrategy implements RequestHandlerStrategy {
 			// 内部逻辑错误
 			throw new Error("Gemini Native 需要 API Key");
 		}
-		const apiMappings = await getApiMappings(); // 从 KV 加载映射
+		// 从缓存读取
+		const apiMappings = globalCache.get<Record<string, string>>(CACHE_KEYS.API_MAPPINGS) || {};
 		const baseUrl = apiMappings['/gemini']; // TODO: Consider if this specific mapping is still needed or should be dynamic
 		if (!baseUrl) {
 			// Handle case where '/gemini' prefix might not be in KV
@@ -649,7 +602,8 @@ class GenericProxyStrategy implements RequestHandlerStrategy {
 	}
 
 	async buildTargetUrl(ctx: StrategyContext, _authDetails: AuthenticationDetails): Promise<URL> { // <-- Mark as async
-		const apiMappings = await getApiMappings(); // 从 KV 加载映射
+		// 从缓存读取
+		const apiMappings = globalCache.get<Record<string, string>>(CACHE_KEYS.API_MAPPINGS) || {};
 		if (!ctx.prefix || !apiMappings[ctx.prefix]) { // 简化检查
 			throw new Response(`未配置代理前缀 '${ctx.prefix}' 的目标地址`, { status: 503 });
 		}
@@ -692,7 +646,8 @@ const determineRequestType = async (
 ): Promise<DetermineResult> => {
 	const req = c.req.raw; // 获取原始请求
 	const url = new URL(req.url);
-	const apiMappings = await getApiMappings(); // 从 KV 加载映射
+	// 从缓存读取
+	const apiMappings = globalCache.get<Record<string, string>>(CACHE_KEYS.API_MAPPINGS) || {};
 	const prefix = Object.keys(apiMappings).find(p => url.pathname.startsWith(p));
 	const path = prefix ? url.pathname.slice(prefix.length) : url.pathname;
 
@@ -714,7 +669,7 @@ const determineRequestType = async (
 				const clonedRequest = req.clone();
 				parsedBody = await clonedRequest.json(); // 解析并存储
 				model = parsedBody?.model ?? null;
-				// console.log("determineRequestType parsed body:", parsedBody);
+				//// console.log("determineRequestType parsed body:", parsedBody);
 			} catch (e) {
 				console.warn("determineRequestType: Failed to parse body for model check:", e);
 				// 解析失败，按非 Vertex 处理 (或可以抛出错误，取决于业务逻辑)
@@ -723,7 +678,8 @@ const determineRequestType = async (
 			}
 		}
 		// 使用导入的 isVertexModel 函数进行判断
-		const isVertex = await isVertexModel(model); // 使用 replacekeys.ts 中的函数
+		// isVertexModel 现在从缓存读取
+		const isVertex = isVertexModel(model); // 使用 replacekeys.ts 中的函数 (内部已用缓存)
 		return {
 			type: isVertex ? RequestType.VERTEX_AI : RequestType.GEMINI_OPENAI, // 使用判断结果
 			prefix,
