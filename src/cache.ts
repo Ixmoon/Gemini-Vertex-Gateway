@@ -109,44 +109,64 @@ export async function getConfigValue<T>(cacheKey: string, defaultValue: T): Prom
 
 		if (cachedResponse) {
 			// Cache Hit
-			// console.log(`Edge Cache: Hit for key "${cacheKey}"`);
+			console.log(`[getConfigValue:${cacheKey}] Cache Hit.`); // DEBUG LOG
 			try {
 				const contentType = cachedResponse.headers.get('content-type');
+				console.log(`[getConfigValue:${cacheKey}] Cached Content-Type: ${contentType}`); // DEBUG LOG
 				if (!contentType || !contentType.includes('application/json')) {
 					console.warn(`Cache data for key "${cacheKey}" is not JSON. Falling back to default, will attempt KV fetch.`);
 					// 不直接返回，继续尝试 KV
 				} else {
 					const text = await cachedResponse.text();
 					if (text === 'null' && defaultValue === null) {
+						console.log(`[getConfigValue:${cacheKey}] Cached value is 'null' string and defaultValue is null. Returning null.`); // DEBUG LOG
 						return null as T; // 正确处理存储的 null 值
 					}
 					if (!text && defaultValue !== null) { // 处理空字符串响应体, 但如果默认值是 null 则允许
+						console.warn(`[getConfigValue:${cacheKey}] Cache data is empty string, but defaultValue is not null. Falling back to KV fetch.`); // DEBUG LOG
 						console.warn(`Cache data for key "${cacheKey}" is empty. Falling back to default, will attempt KV fetch.`);
 						// 不直接返回，继续尝试 KV
 					} else {
 						const data = JSON.parse(text || 'null'); // 处理空文本情况，解析为 null
+						console.log(`[getConfigValue:${cacheKey}] Parsed cached data:`, data, `(Type: ${typeof data}, IsArray: ${Array.isArray(data)})`); // DEBUG LOG
+						console.log(`[getConfigValue:${cacheKey}] Default value:`, defaultValue, `(Type: ${typeof defaultValue}, IsArray: ${Array.isArray(defaultValue)})`); // DEBUG LOG
 
 						// Type checking logic
+						let typeMatch = false;
 						if (typeof data === typeof defaultValue || (data === null && defaultValue === null)) {
+							typeMatch = true;
+							console.log(`[getConfigValue:${cacheKey}] Type match: Basic type or both null.`); // DEBUG LOG
 							return data as T;
 						} else if (Array.isArray(defaultValue) && Array.isArray(data)) {
+							typeMatch = true;
+							console.log(`[getConfigValue:${cacheKey}] Type match: Both arrays.`); // DEBUG LOG
 							return data as T;
 						} else if (typeof defaultValue === 'object' && defaultValue !== null && !Array.isArray(defaultValue) &&
 								   typeof data === 'object' && data !== null && !Array.isArray(data)) {
+							typeMatch = true;
+							console.log(`[getConfigValue:${cacheKey}] Type match: Both non-array objects.`); // DEBUG LOG
 							return data as T;
 						} else {
+							console.warn(`[getConfigValue:${cacheKey}] Cache type mismatch. Expected ${typeof defaultValue}, got ${typeof data}. Falling back to KV fetch.`); // DEBUG LOG
 							console.warn(`Cache type mismatch for key "${cacheKey}". Expected ${typeof defaultValue}, got ${typeof data}. Falling back to default, will attempt KV fetch.`);
 							// 类型不匹配，继续尝试 KV
+						}
+						if (!typeMatch) { // Log if no match was found before falling through
+								console.log(`[getConfigValue:${cacheKey}] No type match found in cache check.`); // DEBUG LOG
 						}
 					}
 				}
 			} catch (parseError) {
+				console.error(`[getConfigValue:${cacheKey}] Error parsing JSON from Edge Cache:`, parseError); // DEBUG LOG
 				console.error(`Error parsing JSON from Edge Cache for key "${cacheKey}":`, parseError);
 				// 解析失败，继续尝试 KV
 			}
+		} else {
+				console.log(`[getConfigValue:${cacheKey}] Cache Miss.`); // DEBUG LOG
 		}
 
 		// Cache Miss or Cache Read Error: Attempt to fetch from KV
+		console.log(`[getConfigValue:${cacheKey}] Attempting to fetch from KV...`); // DEBUG LOG
 		console.log(`Edge Cache: Miss or error for key "${cacheKey}". Attempting to fetch from KV...`);
 		try {
 			const kv = await ensureKv(); // Ensure KV is open
@@ -159,9 +179,12 @@ export async function getConfigValue<T>(cacheKey: string, defaultValue: T): Prom
 			const kvKey: Deno.KvKey = kvKeyArray;
 
 			const result = await kv.get<any>(kvKey);
+			console.log(`[getConfigValue:${cacheKey}] KV get result:`, { versionstamp: result?.versionstamp, value: result?.value }); // DEBUG LOG (Log value separately if large)
 			let kvValue = result?.value ?? DEFAULT_VALUES[cacheKey]; // Use default value if KV is null/undefined
+			console.log(`[getConfigValue:${cacheKey}] Initial kvValue (after default check):`, kvValue, `(Type: ${typeof kvValue})`); // DEBUG LOG
 
 			// Apply the same special validation/handling logic as in load/reload functions
+			console.log(`[getConfigValue:${cacheKey}] Applying KV validation rules...`); // DEBUG LOG
 			if (
 				[CACHE_KEYS.TRIGGER_KEYS, CACHE_KEYS.POOL_KEYS, CACHE_KEYS.FALLBACK_MODELS, CACHE_KEYS.VERTEX_MODELS].includes(cacheKey) &&
 				!Array.isArray(kvValue)
@@ -183,6 +206,8 @@ export async function getConfigValue<T>(cacheKey: string, defaultValue: T): Prom
 
 			// Write the fetched (and validated) value back to Edge Cache
 			// Do this even if it's the default value, to cache the "miss" result from KV
+			console.log(`[getConfigValue:${cacheKey}] Final kvValue after validation:`, kvValue, `(Type: ${typeof kvValue})`); // DEBUG LOG
+			console.log(`[getConfigValue:${cacheKey}] Caching this value to Edge Cache.`); // DEBUG LOG
 			console.log(`KV Fetch: Fetched value for "${cacheKey}". Caching it to Edge Cache.`);
 			// 使用 await 写入缓存，确保操作完成
 			// 移除不正确的 Deno.unstable_kv 调用
@@ -195,25 +220,32 @@ export async function getConfigValue<T>(cacheKey: string, defaultValue: T): Prom
 
 			// Return the value fetched from KV (or the default if KV was empty)
 			// Perform one last type check against the original defaultValue requested
+			console.log(`[getConfigValue:${cacheKey}] Performing final type check before returning KV value.`); // DEBUG LOG
 			if (typeof kvValue === typeof defaultValue || (kvValue === null && defaultValue === null)) {
+					console.log(`[getConfigValue:${cacheKey}] Final type check passed (basic/null). Returning KV value.`); // DEBUG LOG
 					return kvValue as T;
 			} else if (Array.isArray(defaultValue) && Array.isArray(kvValue)) {
+					console.log(`[getConfigValue:${cacheKey}] Final type check passed (array). Returning KV value.`); // DEBUG LOG
 					return kvValue as T;
 			} else if (typeof defaultValue === 'object' && defaultValue !== null && !Array.isArray(defaultValue) &&
 					   typeof kvValue === 'object' && kvValue !== null && !Array.isArray(kvValue)) {
+					console.log(`[getConfigValue:${cacheKey}] Final type check passed (object). Returning KV value.`); // DEBUG LOG
 					return kvValue as T;
 			} else {
+					console.warn(`[getConfigValue:${cacheKey}] Final type check failed. KV value type (${typeof kvValue}) doesn't match expected default type (${typeof defaultValue}). Falling back to original default.`); // DEBUG LOG
 					console.warn(`KV value type mismatch for key "${cacheKey}" after fetch. Expected ${typeof defaultValue}, got ${typeof kvValue}. Falling back to original default.`);
 					return defaultValue; // Final fallback
 			}
 
 		} catch (kvError) {
+			console.error(`[getConfigValue:${cacheKey}] Error during KV fetch/processing:`, kvError); // DEBUG LOG
 			console.error(`Error fetching or processing KV value for key "${cacheKey}":`, kvError);
 			// Fallback to the original default value if KV interaction fails
 			return defaultValue;
 		}
 
 	} catch (cacheError) {
+		console.error(`[getConfigValue:${cacheKey}] Error accessing Edge Cache:`, cacheError); // DEBUG LOG
 		console.error(`Error accessing Edge Cache for key "${cacheKey}":`, cacheError);
 		// Fallback to default if Edge Cache access fails initially
 		return defaultValue;
