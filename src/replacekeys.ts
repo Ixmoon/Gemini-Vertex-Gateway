@@ -261,7 +261,11 @@ export async function getNextPoolKey(): Promise<string | null> {
 	const kv = ensureKv(); // Ensure KV is initialized
 	// 原子递增计数器并获取新值
 	// 原子递增计数器
+	// --- 开始计时 Pool KV commit ---
+	console.time("[Debug] Pool KV Atomic Commit");
 	const atomicIncRes = await kv.atomic().sum(POOL_KEY_ATOMIC_INDEX_KEY, 1n).commit();
+	// --- 结束计时 Pool KV commit ---
+	console.timeEnd("[Debug] Pool KV Atomic Commit");
 
 	if (!atomicIncRes.ok) {
 		console.error("Failed to atomically increment pool key index");
@@ -270,7 +274,11 @@ export async function getNextPoolKey(): Promise<string | null> {
 	}
 
 	// 递增成功后，获取当前的计数值
+	// --- 开始计时 Pool KV get ---
+	console.time("[Debug] Pool KV Get Count");
 	const currentCountEntry = await kv.get<Deno.KvU64>(POOL_KEY_ATOMIC_INDEX_KEY);
+	// --- 结束计时 Pool KV get ---
+	console.timeEnd("[Debug] Pool KV Get Count");
 	// sum 操作存储为 KvU64 (BigInt)
 	if (currentCountEntry.value === null) {
 		console.error("Failed to get pool key index value after increment");
