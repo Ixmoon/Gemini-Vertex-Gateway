@@ -156,21 +156,10 @@ const getGcpAuth = async (): Promise<{ token: string; projectId: string } | null
 	try {
 		// 2. 计算凭证索引 (使用 KV 原子计数器)
 		const kv = await openKv(); // KV 仍然需要用于原子计数器
-
-		// --- 开始计时 KV commit ---
-		console.time("[Debug] KV Atomic Commit");
 		const atomicIncRes = await kv.atomic().sum(GCP_CREDENTIAL_ATOMIC_INDEX_KEY, 1n).commit();
-		// --- 结束计时 KV commit ---
-		console.timeEnd("[Debug] KV Atomic Commit");
-
 		if (!atomicIncRes.ok) throw new Error("KV atomic increment failed");
 
-		// --- 开始计时 KV get ---
-		console.time("[Debug] KV Get Count");
 		const currentCountEntry = await kv.get<Deno.KvU64>(GCP_CREDENTIAL_ATOMIC_INDEX_KEY);
-		// --- 结束计时 KV get ---
-		console.timeEnd("[Debug] KV Get Count");
-
 		if (currentCountEntry.value === null) throw new Error("KV get count failed");
 
 		const count = currentCountEntry.value.value;
@@ -742,8 +731,6 @@ const getStrategy = (type: RequestType): RequestHandlerStrategy => {
 
 // === 主处理函数  ===
 export const handleGenericProxy = async (c: Context): Promise<Response> => {
-	const requestStartTime = performance.now(); // <-- 计时起点
-	console.log(`[Debug] Request received for ${c.req.url} at ${new Date().toISOString()}`); // 添加日志确认请求入口
 
 	const req = c.req.raw;
 	const url = new URL(req.url);
@@ -804,10 +791,6 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 			const targetBody = await strategy.processRequestBody(strategyContext);
 
 			// 5. 执行 Fetch
-			const fetchStartTime = performance.now(); // <-- 计时终点
-			const timeBeforeFetch = fetchStartTime - requestStartTime;
-			console.log(`[Debug] Time before fetch (Attempt ${attempts}, Type: ${RequestType[type]}): ${timeBeforeFetch.toFixed(2)} ms for ${url.pathname}`); // <-- 打印时间差
-
 			const res = await fetch(targetUrl, {
 				method: req.method,
 				headers: targetHeaders,
@@ -823,9 +806,6 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 				}
 
 				// 直接返回上游响应 依赖 Hono/Deno 进行流式传输
-				const responseReceivedTime = performance.now(); // <-- 计时点：成功响应准备好
-				const totalHandlerTime = responseReceivedTime - requestStartTime;
-				console.log(`[Debug] Total handler time (Success, Attempt ${attempts}, Type: ${RequestType[type]}): ${totalHandlerTime.toFixed(2)} ms for ${url.pathname}`);
 				return finalResponse;
 			} else {
 				// 响应不成功时
@@ -854,14 +834,8 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 	// 如果循环结束仍未成功，返回最后一次遇到的错误 Response
 	if (lastError) {
 		// 直接返回最后捕获到的 Response 对象
-		const responseReceivedTime = performance.now(); // <-- 计时点：失败响应准备好
-		const totalHandlerTime = responseReceivedTime - requestStartTime;
-		console.log(`[Debug] Total handler time (Failure, Attempt ${attempts}, Type: ${RequestType[type]}): ${totalHandlerTime.toFixed(2)} ms for ${url.pathname}`);
 		return lastError;
 	}
 	// 如果 lastError 意外为 null，则返回通用错误
-	const responseReceivedTime = performance.now(); // <-- 计时点：最终错误响应准备好
-	const totalHandlerTime = responseReceivedTime - requestStartTime;
-	console.log(`[Debug] Total handler time (Max retries reached, Type: ${RequestType[type]}): ${totalHandlerTime.toFixed(2)} ms for ${url.pathname}`);
 	return new Response("请求处理失败，已达最大重试次数", { status: 500 });
 };
