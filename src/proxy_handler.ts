@@ -812,6 +812,9 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 				}
 
 				// 直接返回上游响应 依赖 Hono/Deno 进行流式传输
+				const responseReceivedTime = performance.now(); // <-- 计时点：成功响应准备好
+				const totalHandlerTime = responseReceivedTime - requestStartTime;
+				console.log(`[Debug] Total handler time (Success, Attempt ${attempts}, Type: ${RequestType[type]}): ${totalHandlerTime.toFixed(2)} ms for ${url.pathname}`);
 				return finalResponse;
 			} else {
 				// 响应不成功时
@@ -840,8 +843,14 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 	// 如果循环结束仍未成功，返回最后一次遇到的错误 Response
 	if (lastError) {
 		// 直接返回最后捕获到的 Response 对象
+		const responseReceivedTime = performance.now(); // <-- 计时点：失败响应准备好
+		const totalHandlerTime = responseReceivedTime - requestStartTime;
+		console.log(`[Debug] Total handler time (Failure, Attempt ${attempts}, Type: ${RequestType[type]}): ${totalHandlerTime.toFixed(2)} ms for ${url.pathname}`);
 		return lastError;
 	}
 	// 如果 lastError 意外为 null，则返回通用错误
+	const responseReceivedTime = performance.now(); // <-- 计时点：最终错误响应准备好
+	const totalHandlerTime = responseReceivedTime - requestStartTime;
+	console.log(`[Debug] Total handler time (Max retries reached, Type: ${RequestType[type]}): ${totalHandlerTime.toFixed(2)} ms for ${url.pathname}`);
 	return new Response("请求处理失败，已达最大重试次数", { status: 500 });
 };
