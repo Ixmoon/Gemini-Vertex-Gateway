@@ -1,5 +1,5 @@
 // --- 导入缓存模块 ---
-import { globalCache, CACHE_KEYS, reloadKvConfig, initializeAndCacheGcpAuth } from "./cache.ts"; // Import reloadKvConfig
+import { globalCache, CACHE_KEYS, reloadKvConfig} from "./cache.ts"; // Import reloadKvConfig
 
 // --- 类型定义 ---
 export type ApiKeySource = 'user' | 'fallback' | 'pool';
@@ -34,9 +34,6 @@ export const VERTEX_MODELS_KEY = ["vertex_models"];
 export const FALLBACK_MODELS_KEY = ["fallback_models"];
 export const API_RETRY_LIMIT_KEY = ["api_retry_limit"];
 export const API_MAPPINGS_KEY = ["api_mappings"];
-
-// --- 内存缓存 (Remove old variables) ---
-// let cachedApiMappings: Record<string, string> | null = null; // Removed
 
 // --- KV 实例管理 ---
 let kv: Deno.Kv | null = null;

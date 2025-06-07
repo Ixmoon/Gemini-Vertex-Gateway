@@ -1,24 +1,11 @@
 import {
-	ADMIN_PASSWORD_HASH_KEY,
-	TRIGGER_KEYS_KEY,
-	POOL_KEYS_KEY,
-	FALLBACK_KEY_KEY,
-	FALLBACK_MODELS_KEY,
-	API_RETRY_LIMIT_KEY,
-	API_MAPPINGS_KEY,
-	GCP_CREDENTIALS_STRING_KEY,
-	GCP_DEFAULT_LOCATION_KEY,
-	VERTEX_MODELS_KEY,
 	ensureKv, // 确保 kv 实例存在
 	_getKvValue, // 获取单个 KV 值
 	_getList, // 获取列表
 	parseCreds, // 解析 GCP 凭证
 	GcpCredentials, // GCP 凭证类型
-	// 导入原子计数器键，虽然不在缓存中，但可能相关
-	POOL_KEY_ATOMIC_INDEX_KEY,
-	GCP_CREDENTIAL_ATOMIC_INDEX_KEY
 } from "./replacekeys.ts"; // 从 replacekeys 导入常量和类型
-import { GoogleAuth } from "https://esm.sh/google-auth-library"; // 导入 GoogleAuth
+import { GoogleAuth } from "google-auth-library"; // 导入 GoogleAuth
 
 // --- 缓存接口和类 (保持不变) ---
 interface CacheEntry<T> {
@@ -78,10 +65,14 @@ export const CACHE_KEYS = {
 
 	// 新增：用于缓存处理后的 GoogleAuth 实例数组
 	GCP_AUTH_INSTANCES: "gcp_auth_instances",
+
 };
 
-// --- 默认 TTL (保持不变, 但预加载通常不需要 TTL) ---
-export const DEFAULT_CACHE_TTL = 5 * 60 * 1000; // 300,000 毫秒
+// --- 默认 TTL ---
+export const DEFAULT_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+// GCP_TOKEN_CACHE_TTL removed, managed by proxy_handler directly with MemoryCache TTL
+
+// --- GcpTokenCacheEntry interface removed, managed by proxy_handler ---
 
 // --- 所有需要预加载的 KV 键数组 (Deno.KvKey[]) ---
 const PRELOAD_KV_KEYS: Deno.KvKey[] = [
@@ -149,7 +140,6 @@ export async function loadAndCacheAllKvConfigs(): Promise<void> {
 			}
 
 			globalCache.set(cacheKey, value); // 存入缓存 (永不过期)
-			// console.log(`Cached ${cacheKey}:`, value); // 调试日志
 		});
 		console.log("KV config preloading finished.");
 	} catch (error) {

@@ -1,23 +1,11 @@
 // --- 导入 Hono 和相关模块 ---
-import { Hono, Context } from "https://deno.land/x/hono@v4.3.11/mod.ts";
-import { cors } from "https://deno.land/x/hono@v4.3.11/middleware.ts";
-import { serveStatic } from "https://deno.land/x/hono@v4.3.11/middleware.ts";
+import { Hono, } from "hono";
+import { serveStatic } from "hono/middleware";
 
 // --- 导入现有模块 ---
 import * as kvOps from "./replacekeys.ts"; // Keep existing kvOps import for other functions
-// Import specific functions needed for API Mappings
-import {
-	getApiMappings,
-	setApiMappings,
-	clearApiMappings,
-	// Keep other necessary imports from kvOps if any are used directly elsewhere,
-	// or refactor to use the specific imports consistently.
-	// For now, we keep the wildcard import alongside specific ones.
-} from "./replacekeys.ts";
 // --- 导入新的代理处理模块 ---
-// Remove apiMapping import as it's no longer exported/used from proxy_handler
 import { handleGenericProxy } from "./proxy_handler.ts";
-// Import cache functions
 import { loadAndCacheAllKvConfigs, initializeAndCacheGcpAuth } from "./cache.ts";
 
 // --- 辅助函数 (非代理相关) ---
@@ -52,14 +40,7 @@ app.get('/manage.js', serveStatic({ path: './src/manage.js' }));
 
 // --- 管理 API 路由 ---
 
-// 管理员密码认证中间件
-const adminAuthMiddleware = async (c: Context, next: () => Promise<void>) => {
-	const adminPassword = c.req.header('X-Admin-Password');
-	if (!adminPassword || !(await kvOps.verifyAdminPassword(adminPassword))) {
-		return c.json({ error: "Unauthorized: Invalid or missing X-Admin-Password header" }, 401);
-	}
-	await next();
-};
+// Admin auth middleware moved to manage_api.ts
 
 // 不需要密码的登录路由
 app.post('/api/manage/login', async (c) => {
@@ -86,189 +67,11 @@ app.post('/api/manage/login', async (c) => {
 	}
 });
 
-// 应用密码中间件和 CORS 到后续管理路由组
-const manageApi = new Hono();
-// Define CORS options (same as before)
-const corsOptions = {
-	origin: '*', // 允许所有来源
-	allowMethods: ['GET', 'POST', 'OPTIONS', 'PUT', 'DELETE'],
-	allowHeaders: ['Authorization', 'Content-Type', 'X-Admin-Password', 'Accept', 'User-Agent', 'x-goog-api-key', 'x-goog-api-client'],
-	credentials: true,
-};
-manageApi.use('*', cors(corsOptions)); // Apply CORS to manage API routes
-manageApi.use('*', adminAuthMiddleware); // Apply auth middleware after CORS
+// Management API routes moved to manage_api.ts
 
-// Helper to wrap management API calls with try-catch and success/error payloads
-// Helper to wrap management API calls with try-catch and success/error payloads
-async function handleManageApiCall<T>(
-	logic: () => Promise<T>,
-	successMessage: string | ((result: T) => string),
-	errorMessagePrefix: string
-): Promise<Response> {
-	try {
-		const result = await logic();
-		const message = typeof successMessage === 'function' ? successMessage(result) : successMessage;
-		// 如果 result 是简单类型或 null/undefined，包装在 data 字段中
-		// 如果 result 本身是对象，直接作为 payload
-		const payloadData = (result !== null && typeof result === 'object') ? result : { data: result };
-		return createSuccessPayload({ ...payloadData, message });
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		const status = error instanceof TypeError ? 400 : 500; // Basic error type check
-		return createErrorPayload(`${errorMessagePrefix}: ${message}`, status);
-	}
-}
-
-// Trigger Keys 路由
-manageApi.get('/trigger-keys', (c) => handleManageApiCall(
-	async () => ({ keys: Array.from(await kvOps.getTriggerKeys()) }),
-	() => "Trigger keys fetched successfully.",
-	"Failed to get trigger keys"
-));
-manageApi.post('/trigger-keys', async (c) => {
-	const { key } = await c.req.json();
-	return handleManageApiCall(() => kvOps.addTriggerKey(key), "Trigger key added.", "Failed to add trigger key");
-});
-manageApi.delete('/trigger-keys', async (c) => {
-	const { key } = await c.req.json();
-	return handleManageApiCall(() => kvOps.removeTriggerKey(key), "Trigger key removed.", "Failed to remove trigger key");
-});
-
-// Pool Keys 路由
-manageApi.get('/pool-keys', (c) => handleManageApiCall(
-	async () => ({ keys: await kvOps.getPoolKeys() }),
-	() => "Pool keys fetched successfully.",
-	"Failed to get pool keys"
-));
-manageApi.post('/pool-keys', async (c) => {
-	const { keys } = await c.req.json();
-	return handleManageApiCall(() => kvOps.addPoolKeys(keys), "Pool keys added.", "Failed to add pool keys");
-});
-manageApi.delete('/pool-keys', async (c) => {
-	const { key } = await c.req.json();
-	return handleManageApiCall(() => kvOps.removePoolKey(key), "Pool key removed.", "Failed to remove pool key");
-});
-manageApi.delete('/pool-keys/all', (c) => handleManageApiCall(
-	kvOps.clearPoolKeys,
-	"All pool keys cleared.",
-	"Failed to clear pool keys"
-));
-
-// Fallback Key 路由
-manageApi.get('/fallback-key', (c) => handleManageApiCall(
-	async () => ({ key: await kvOps.getFallbackKey() }),
-	() => "Fallback key fetched successfully.",
-	"Failed to get fallback key"
-));
-manageApi.post('/fallback-key', async (c) => {
-	const { key } = await c.req.json();
-	return handleManageApiCall(() => kvOps.setFallbackKey(key), "Fallback key updated.", "Failed to update fallback key");
-});
-
-// Fallback Models 路由
-manageApi.get('/fallback-models', (c) => handleManageApiCall(
-	async () => ({ models: Array.from(await kvOps.getFallbackModels()) }),
-	() => "Fallback models fetched successfully.",
-	"Failed to get fallback models"
-));
-manageApi.post('/fallback-models', async (c) => {
-	const { models } = await c.req.json();
-	return handleManageApiCall(() => kvOps.addFallbackModels(models), "Fallback models added.", "Failed to add fallback models");
-});
-manageApi.delete('/fallback-models/all', (c) => handleManageApiCall(
-	kvOps.clearFallbackModels,
-	"All fallback models cleared.",
-	"Failed to clear fallback models"
-));
-
-// Retry Limit 路由
-manageApi.get('/retry-limit', (c) => handleManageApiCall(
-	async () => ({ limit: await kvOps.getApiRetryLimit() }),
-	() => "API retry limit fetched successfully.",
-	"Failed to get API retry limit"
-));
-manageApi.post('/retry-limit', async (c) => {
-	const { limit } = await c.req.json();
-	return handleManageApiCall(() => kvOps.setApiRetryLimit(limit), "API retry limit updated.", "Failed to set API retry limit");
-});
-
-// GCP Credentials 路由 (仅设置，不获取)
-manageApi.post('/gcp-credentials', async (c) => {
-	const { credentials } = await c.req.json();
-	return handleManageApiCall(async () => {
-		// Cache invalidation/reloading is handled internally by setGcpCredentialsString now
-		await kvOps.setGcpCredentialsString(credentials ?? null);
-	}, "GCP credentials updated.", "Failed to set GCP credentials");
-	});
-	manageApi.get('/gcp-credentials', (c) => handleManageApiCall(
-	async () => ({ credentials: await kvOps.getGcpCredentialsString() }), // 假设 kvOps 中有此函数
-	() => "GCP credentials fetched successfully.",
-	"Failed to get GCP credentials"
-));
-// Note: No cache invalidation needed for GET, but POST needs it.
-
-// GCP Default Location 路由
-manageApi.get('/gcp-location', (c) => handleManageApiCall(
-	async () => ({ location: await kvOps.getGcpDefaultLocation() }),
-	() => "GCP default location fetched successfully.",
-	"Failed to get GCP default location"
-));
-manageApi.post('/gcp-location', async (c) => {
-	const { location } = await c.req.json();
-	return handleManageApiCall(() => kvOps.setGcpDefaultLocation(location), "GCP default location updated.", "Failed to set GCP default location");
-});
-
-// Vertex Models 路由
-manageApi.get('/vertex-models', (c) => handleManageApiCall(
-	async () => ({ models: Array.from(await kvOps.getVertexModels()) }),
-	() => "Vertex models fetched successfully.",
-	"Failed to get Vertex models"
-));
-manageApi.post('/vertex-models', async (c) => {
-	const { models } = await c.req.json();
-	if (!Array.isArray(models)) {
-		return createErrorPayload("Invalid input: models must be an array.", 400);
-	}
-	return handleManageApiCall(async () => {
-		await kvOps.clearVertexModels();
-		await kvOps.addVertexModels(models);
-	}, "Vertex models list updated.", "Failed to set Vertex models");
-});
-manageApi.delete('/vertex-models/all', (c) => handleManageApiCall(
-	kvOps.clearVertexModels,
-	"All Vertex models cleared.",
-	"Failed to clear Vertex models"
-));
-
-// API Mappings 路由
-manageApi.get('/api-mappings', (c) => handleManageApiCall(
-	async () => ({ mappings: await getApiMappings() }),
-	() => "API mappings fetched successfully.",
-	"Failed to get API mappings"
-));
-manageApi.post('/api-mappings', async (c) => {
-	const { mappings } = await c.req.json();
-	// 基本验证：确保 mappings 是一个对象
-	if (typeof mappings !== 'object' || mappings === null) {
-		return createErrorPayload("Invalid input: mappings must be an object.", 400);
-	}
-	// TODO: 可以添加更严格的验证，例如检查键和值是否都是字符串
-	return handleManageApiCall(async () => {
-		await setApiMappings(mappings);
-		// invalidateApiMappingsCache(); // No longer needed, handled by setApiMappings internally via reloadKvConfig
-	}, "API mappings updated.", "Failed to set API mappings");
-});
-manageApi.delete('/api-mappings', (c) => handleManageApiCall(
-	async () => {
-		await clearApiMappings();
-		// invalidateApiMappingsCache(); // No longer needed, handled by clearApiMappings internally via reloadKvConfig
-	},
-	"API mappings cleared.",
-	"Failed to clear API mappings"
-));
-
-// 将管理 API 子应用挂载到主应用
-app.route('/api/manage', manageApi);
+// 导入并挂载管理 API 子应用 (在登录路由之后)
+import { manageApp } from "./manage_api.ts";
+app.route('/api/manage', manageApp);
 
 
 // --- 代理路由 ---
@@ -314,10 +117,21 @@ if (portFromEnv) { // 检查是否存在
 // 在启动前初始化 KV 和加载/缓存 GCP 凭证 (使用导入的函数)
 await kvOps.openKv();
 console.log("KV opened.");
-await loadAndCacheAllKvConfigs(); // Preload all KV configs into cache
-console.log("KV configs cached.");
-await initializeAndCacheGcpAuth(); // Initialize GCP Auth instances based on cached creds
-console.log("GCP Auth initialized and cached.");
+
+// 并行加载配置和初始化 GCP Auth (使用导入的函数)
+try {
+	console.log("Starting parallel loading of KV configs and GCP Auth initialization...");
+	await Promise.all([
+		loadAndCacheAllKvConfigs(), // 预加载所有 KV 配置到缓存
+		initializeAndCacheGcpAuth()  // 基于缓存的凭证初始化 GCP Auth 实例 (会等待凭证缓存就绪)
+	]);
+	console.log("KV configs cached and GCP Auth initialized successfully.");
+} catch (error) {
+	console.error("Error during parallel startup initialization:", error);
+	// 根据需要决定服务器是否仍应启动或退出
+	// 当前选择继续启动，但某些功能可能因初始化失败而受影响
+	console.warn("Server might start with incomplete initialization due to errors.");
+}
 
 // 启动服务器
 Deno.serve({ port }, app.fetch);

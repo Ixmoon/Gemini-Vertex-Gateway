@@ -1,12 +1,9 @@
-import { Context } from "https://deno.land/x/hono@v4.3.11/mod.ts";
-import { GoogleAuth } from "https://esm.sh/google-auth-library";
+import { Context } from "hono";
+import { GoogleAuth } from "google-auth-library";
 
 // 导入 kv 操作函数、类型和常量
 import {
 	openKv, // KV 实例操作
-	// getGcpCredentialsString, // 由 cache.ts 处理
-	// getGcpDefaultLocation, // 由 cache.ts 处理
-	// getApiRetryLimit, // 由 cache.ts 处理
 	getApiKeyForRequest, // 获取请求的 API Key (核心逻辑)
 	isTriggerKey, // 检查是否为触发 Key
 	getNextPoolKey, // 获取下一个密钥池 Key
@@ -14,17 +11,19 @@ import {
 	ApiKeySource, // Key 来源类型
 	ApiKeyResult, // API Key 结果类型
 	GCP_CREDENTIAL_ATOMIC_INDEX_KEY, // GCP 凭证原子计数器 Key
-	// getApiMappings, // 由 cache.ts 处理
 	parseCreds, // 需要解析凭证以获取 Project ID
 	GcpCredentials, // 需要凭证类型
 } from "./replacekeys.ts";
-// 导入缓存模块
 import { globalCache, CACHE_KEYS } from "./cache.ts";
 
-// === 类型定义 ===
+// Define GcpTokenCacheEntry and TTL locally as they were removed from cache.ts
+const GCP_TOKEN_CACHE_TTL = 55 * 60 * 1000; // 55 minutes
+interface GcpTokenCacheEntry {
+	token: string;
+	projectId: string;
+}
 
-// GcpCredentials 接口现在从 replacekeys.ts 导入
-// export interface GcpCredentials { ... } // 移除本地定义
+// === 类型定义 ===
 
 // 请求处理类型枚举
 enum RequestType {
@@ -38,7 +37,7 @@ enum RequestType {
 // 认证详情 (由策略返回)
 interface AuthenticationDetails {
 	key: string | null;			 // Gemini API Key
-	source: ApiKeySource | null; // Key 来源 (user/pool/fallback) <--- 移除 kvOps.
+	source: ApiKeySource | null; 
 	gcpToken: string | null;		// GCP Access Token
 	gcpProject: string | null;	  // GCP Project ID
 	maxRetries: number;			 // 最大重试次数 (由策略决定)
@@ -53,9 +52,6 @@ interface StrategyContext {
 	parsedBody?: any | null;	// 预解析的 Body (由 determineRequestType 提供)
 }
 
-// === API 路径映射 ===
-
-// API 路径映射现在从 KV 数据库加载
 // === 全局状态 ===
 
 /** 构建基础代理 Headers (过滤掉 host) */
@@ -88,10 +84,6 @@ const isValidCred = (cred: any): cred is GcpCredentials =>
 	cred?.private_key_id &&
 	cred?.private_key &&
 	cred?.client_email;
-
-// parseCreds 已移至 replacekeys.ts 并从那里导入
-/*
-// parseCreds 函数已移至 replacekeys.ts 并从那里导入。此处的注释块已移除。
 
 /** [内部][重构] 尝试获取第一个 GCP 凭证的 Token (优先读 KV 缓存, 1 分钟 TTL) - 从缓存读取 Auth 和 Creds */
 const _tryGetFirstGcpToken = async (): Promise<{ token: string; projectId: string } | null> => {
@@ -138,13 +130,6 @@ const _tryGetFirstGcpToken = async (): Promise<{ token: string; projectId: strin
 	}
 };
 
-// --- 移除旧的全局缓存变量和加载函数 ---
-// let cachedGcpCreds: GcpCredentials[] = []; // Removed
-// let cachedGcpAuths: GoogleAuth[] = []; // Removed
-// let gcpCredsLoaded = false; // Removed
-// export const loadAndCacheGcpCreds = ... // Removed
-// export const invalidateGcpCredsCache = ... // Removed
-
 
 // [重构] 使用全局缓存和原子计数器获取 GCP 认证信息 (优先读 KV Token 缓存, 1 分钟 TTL)
 const getGcpAuth = async (): Promise<{ token: string; projectId: string } | null> => {
@@ -166,11 +151,10 @@ const getGcpAuth = async (): Promise<{ token: string; projectId: string } | null
 
 
 	let calculatedIndex = -1; // 用于错误日志和回退
-	const cacheTTL = 60000; // 1 分钟 (毫秒)
 
 	try {
-		// 2. 计算凭证索引 (使用原子计数器)
-		const kv = await openKv();
+		// 2. 计算凭证索引 (使用 KV 原子计数器)
+		const kv = await openKv(); // KV 仍然需要用于原子计数器
 		const atomicIncRes = await kv.atomic().sum(GCP_CREDENTIAL_ATOMIC_INDEX_KEY, 1n).commit();
 		if (!atomicIncRes.ok) throw new Error("KV atomic increment failed");
 
@@ -179,35 +163,35 @@ const getGcpAuth = async (): Promise<{ token: string; projectId: string } | null
 
 		const count = currentCountEntry.value.value;
 		calculatedIndex = Number(count % BigInt(auths.length));
-		const cacheKey = ["gcp_token_cache", calculatedIndex]; // 缓存键包含索引
+		const memoryCacheKey = "gcp_token_" + calculatedIndex; // 使用固定的字符串前缀
 
-		// 3. 尝试从 KV 缓存读取
-		const cachedEntry = await kv.get<{ token: string; projectId: string }>(cacheKey);
-		if (cachedEntry.value) {
-			//// console.log(`Cache hit for index ${calculatedIndex}`);
-			return cachedEntry.value;
+		// 3. 尝试从内存缓存读取
+		const cachedEntry = globalCache.get<GcpTokenCacheEntry>(memoryCacheKey);
+		if (cachedEntry) {
+			// console.log(`Memory cache hit for index ${calculatedIndex}`);
+			return cachedEntry; // MemoryCache 内部处理了过期
 		}
 
-		// 4. 缓存未命中或过期，获取新 Token
-		//// console.log(`Cache miss/expired for index ${calculatedIndex}. Fetching new token.`);
+		// 4. 内存缓存未命中，获取新 Token
+		// console.log(`Memory cache miss for index ${calculatedIndex}. Fetching new token.`);
 		const newToken = await auths[calculatedIndex].getAccessToken();
 		if (!newToken) {
 			console.error(`GCP auth returned null token for atomic index ${calculatedIndex}.`);
 			throw new Error("GCP returned null token"); // 触发回退
 		}
 
-		// 5. 成功获取，存入 KV 缓存并返回
+		// 5. 成功获取，存入内存缓存并返回
 		// 从解析的 creds 获取 projectId
 		if (calculatedIndex < 0 || calculatedIndex >= creds.length) {
-			 console.error(`getGcpAuth: Calculated index ${calculatedIndex} is out of bounds for parsed credentials (length ${creds.length}) when creating token data.`);
-			 throw new Error("Credential index out of bounds"); // 触发回退
+			console.error(`getGcpAuth: Calculated index ${calculatedIndex} is out of bounds for parsed credentials (length ${creds.length}) when creating token data.`);
+			throw new Error("Credential index out of bounds"); // 触发回退
 		}
 		const projectId = creds[calculatedIndex].project_id;
-		const tokenData = { token: newToken, projectId: projectId };
-		// 异步写入缓存，不阻塞返回
-		kv.set(cacheKey, tokenData, { expireIn: cacheTTL }).catch(e => {
-			console.error(`Failed to set KV cache for index ${calculatedIndex}:`, e);
-		});
+		const tokenData: GcpTokenCacheEntry = { token: newToken, projectId: projectId };
+
+		// 存入内存缓存 (使用 cache.ts 中定义的 TTL)
+		globalCache.set(memoryCacheKey, tokenData, GCP_TOKEN_CACHE_TTL);
+		// console.log(`Stored new token for index ${calculatedIndex} in memory cache.`);
 		return tokenData;
 
 	} catch (error) {
@@ -352,46 +336,56 @@ class VertexAIStrategy implements RequestHandlerStrategy {
 			return null;
 		}
 
-		// 如果 Body 已经被预解析 (在 determineRequestType 中), 则使用解析后的结果
+		let bodyToModify: any;
+
+		// 检查 ctx.parsedBody 是否已存在且不为 null
 		if (ctx.parsedBody !== undefined && ctx.parsedBody !== null) {
-			let bodyToModify = ctx.parsedBody;
-
-			// 确保 body 是一个对象 (如果为 null 或非对象，则无法修改)
-			if (typeof bodyToModify !== 'object') {
-				console.warn("Vertex: Pre-parsed body is not an object.");
-				// 无法应用修改，但仍需返回 JSON 字符串
-				return JSON.stringify(bodyToModify);
-			}
-
+			// console.log("Vertex: Using pre-parsed body.");
+			bodyToModify = ctx.parsedBody;
+		} else {
 			try {
-				// --- 修改 Body 内容 ---
-				if (bodyToModify.model && typeof bodyToModify.model === 'string' && !bodyToModify.model.startsWith('google/')) {
-					bodyToModify.model = `google/${bodyToModify.model}`;
-				}
-				if (bodyToModify.reasoning_effort === 'none') {
-					delete bodyToModify.reasoning_effort;
-				}
-				bodyToModify.google = {
-					...(bodyToModify.google || {}),
-					safety_settings: [
-						{ "category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF" },
-						{ "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF" },
-						{ "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF" },
-						{ "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF" },
-					]
-				};
-				// --- 结束修改 Body 内容 ---
-				return JSON.stringify(bodyToModify); // 返回修改后的 JSON 字符串
+				// 注意：这里消耗原始请求的 Body 流
+				bodyToModify = await ctx.originalRequest.json();
 			} catch (e) {
-				console.error("Vertex body modification error:", e);
-				const message = e instanceof Error ? e.message : "Failed to modify Vertex AI request body";
-				throw new Response(message, { status: 500 }); // 内部处理错误
+				console.error("Vertex: Failed to parse original request body:", e);
+				throw new Response("Failed to parse request body for Vertex AI", { status: 400 });
 			}
 		}
-		// 如果 Body 未被预解析，则直接返回原始 Body 流
-		else {
-			// console.log("Vertex: Body not pre-parsed, returning original stream.");
-			return ctx.originalRequest.body;
+
+		// 确保 body 是一个对象
+		if (typeof bodyToModify !== 'object' || bodyToModify === null) {
+			console.warn("Vertex: Parsed body is not an object, cannot apply modifications.");
+			// 如果不是对象，仍然尝试 stringify 返回
+			try {
+				return JSON.stringify(bodyToModify);
+			} catch (stringifyError) {
+				console.error("Vertex: Failed to stringify non-object body:", stringifyError);
+				throw new Response("Failed to process non-object request body", { status: 500 });
+			}
+		}
+
+		// 修改 Body 内容
+		try {
+			if (bodyToModify.model && typeof bodyToModify.model === 'string' && !bodyToModify.model.startsWith('google/')) {
+				bodyToModify.model = `google/${bodyToModify.model}`;
+			}
+			if (bodyToModify.reasoning_effort === 'none') {
+				delete bodyToModify.reasoning_effort;
+			}
+			bodyToModify.google = {
+				...(bodyToModify.google || {}),
+				safety_settings: [
+					{ "category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF" },
+					{ "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF" },
+					{ "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF" },
+					{ "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF" },
+				]
+			};
+			return JSON.stringify(bodyToModify); // 返回修改后的 JSON 字符串
+		} catch (e) {
+			console.error("Vertex body modification error:", e);
+			const message = e instanceof Error ? e.message : "Failed to modify Vertex AI request body";
+			throw new Response(message, { status: 500 });
 		}
 	}
 }
@@ -401,24 +395,12 @@ class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 	async getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
 		let modelNameForKeyLookup: string | null = null;
 
-		// 优先使用预解析的 Body 中的 model
+		// 优先使用预解析的 Body 中的 model (如果存在且是对象)
 		if (ctx.parsedBody && typeof ctx.parsedBody === 'object' && ctx.parsedBody !== null) {
-			   //// console.log("Gemini OpenAI using pre-parsed body for model");
+			// console.log("Gemini OpenAI using pre-parsed body for model");
 			modelNameForKeyLookup = ctx.parsedBody.model ?? null;
 		}
-		// 如果没有预解析的 Body，并且请求可能有 Body，则尝试解析克隆的请求
-		else if (ctx.parsedBody === undefined && ctx.originalRequest.body && ctx.originalRequest.method !== 'GET' && ctx.originalRequest.method !== 'HEAD') {
-			try {
-			    //// console.log("Gemini OpenAI parsing cloned request for model");
-			 // 克隆请求以允许后续策略（processRequestBody）也能读取 body stream
-			 const clonedRequest = ctx.originalRequest.clone();
-				const body = await clonedRequest.json();
-				modelNameForKeyLookup = body?.model ?? null;
-			} catch (e) {
-				console.warn("Gemini OpenAI getAuth: Failed to parse cloned body for model name:", e);
-				// 解析失败，继续执行，modelNameForKeyLookup 将为 null
-			}
-		}
+		// 不再尝试在此处解析 Body
 
 		// 调用公共辅助函数获取认证详情
 		return await _getGeminiAuthenticationDetails(c, modelNameForKeyLookup, attempt, "Gemini OpenAI");
@@ -467,7 +449,8 @@ class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 		if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD' || !ctx.originalRequest.body) {
 			return null;
 		}
-		// 如果 Body 已经被预解析，返回 JSON 字符串
+
+		// 如果 Body 已经被预解析 (在 determineRequestType 中), 返回其 JSON 字符串形式
 		if (ctx.parsedBody !== undefined && ctx.parsedBody !== null) {
 			// console.log("Gemini OpenAI: Returning pre-parsed body as JSON string.");
 			try {
@@ -477,11 +460,10 @@ class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 				throw new Response("Failed to process pre-parsed request body", { status: 500 });
 			}
 		}
-		// 如果 Body 未被预解析，则返回原始 Body 流的一个克隆 (使用 tee)
+		// 如果 Body 未被预解析，则直接返回原始 Body 流
 		else {
-			// console.log("Gemini OpenAI: Body not pre-parsed, returning teed stream.");
-			const [stream1, _stream2] = ctx.originalRequest.body.tee();
-			return stream1;
+			// console.log("Gemini OpenAI: Body not pre-parsed, returning original stream.");
+			return ctx.originalRequest.body;
 		}
 	}
 
@@ -492,6 +474,7 @@ class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 			return response;
 		}
 
+		// 注意：这里消耗了原始响应的 Body 流
 		const bodyText = await response.text();
 		try {
 			const body = JSON.parse(bodyText);
@@ -508,18 +491,30 @@ class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 			if (modified) {
 				const newBody = JSON.stringify(body);
 				const newHeaders = new Headers(response.headers);
-				newHeaders.set('Content-Length', String(newBody.length));
+				// 移除 Content-Encoding，因为我们改变了内容
+				newHeaders.delete('Content-Encoding');
+				newHeaders.set('Content-Length', String(new TextEncoder().encode(newBody).byteLength));
 				return new Response(newBody, {
 					status: response.status,
 					statusText: response.statusText,
 					headers: newHeaders
 				});
 			} else {
-				return response; // 未修改则直接返回原始响应
+				// 如果未修改，需要重新创建响应，因为原始流已被消耗
+				return new Response(bodyText, {
+					status: response.status,
+					statusText: response.statusText,
+					headers: response.headers // 保留原始 headers
+				});
 			}
 		} catch (e) {
 			console.error("Gemini models fix error:", e);
-			return response; // 解析失败直接返回原始响应
+			// 解析失败，返回原始文本（流已被消耗）
+			return new Response(bodyText, {
+				status: response.status,
+				statusText: response.statusText,
+				headers: response.headers
+			});
 		}
 	}
 }
@@ -532,14 +527,10 @@ class GeminiNativeStrategy implements RequestHandlerStrategy {
 		// 优先从路径获取模型名称
 		const match = ctx.path.match(/\/models\/([^:]+):/);
 		if (match && match[1]) {
-			   //// console.log("Gemini Native using path for model");
+			   // console.log("Gemini Native using path for model");
 			modelNameForKeyLookup = match[1];
 		}
-		// 如果路径中没有模型，我们就不再尝试从 Body 中解析它，
-		// 因为这可能导致流被锁定。直接传递 null 给 _getGeminiAuthenticationDetails。
-		// else {
-		//    // Removed body parsing logic to avoid locking the stream
-		// }
+		// 不再尝试从 Body 解析模型名称
 
 		// 调用公共辅助函数获取认证详情
 		return await _getGeminiAuthenticationDetails(c, modelNameForKeyLookup, attempt, "Gemini Native");
@@ -584,7 +575,9 @@ class GeminiNativeStrategy implements RequestHandlerStrategy {
 		if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD' || !ctx.originalRequest.body) {
 			return null;
 		}
-		// 如果 Body 已经被预解析，返回 JSON 字符串
+
+		// 如果 Body 已经被预解析 (在 determineRequestType 中), 返回其 JSON 字符串形式
+		// 注意：Gemini Native 路径通常不预解析 Body，所以 ctx.parsedBody 常常是 undefined
 		if (ctx.parsedBody !== undefined && ctx.parsedBody !== null) {
 			// console.log("Gemini Native: Returning pre-parsed body as JSON string.");
 			try {
@@ -594,11 +587,10 @@ class GeminiNativeStrategy implements RequestHandlerStrategy {
 				throw new Response("Failed to process pre-parsed request body", { status: 500 });
 			}
 		}
-		// 如果 Body 未被预解析，则返回原始 Body 流的一个克隆 (使用 tee)
+		// 如果 Body 未被预解析，则直接返回原始 Body 流
 		else {
-			// console.log("Gemini Native: Body not pre-parsed, returning teed stream.");
-			const [stream1, _stream2] = ctx.originalRequest.body.tee();
-			return stream1;
+			// console.log("Gemini Native: Body not pre-parsed, returning original stream.");
+			return ctx.originalRequest.body;
 		}
 	}
 }
@@ -640,26 +632,10 @@ class GenericProxyStrategy implements RequestHandlerStrategy {
 	}
 
 	async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null | ReadableStream> {
-		// 优先处理无 Body 的请求
-		if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD' || !ctx.originalRequest.body) {
-			return null;
-		}
-		// 如果 Body 已经被预解析，返回 JSON 字符串 (虽然通用代理通常不预解析，但保持一致性)
-		if (ctx.parsedBody !== undefined && ctx.parsedBody !== null) {
-			// console.log("Generic Proxy: Returning pre-parsed body as JSON string.");
-			try {
-				return JSON.stringify(ctx.parsedBody);
-			} catch (e) {
-				console.error("Generic Proxy: Failed to stringify pre-parsed body:", e);
-				throw new Response("Failed to process pre-parsed request body", { status: 500 });
-			}
-		}
-		// 如果 Body 未被预解析，则返回原始 Body 流的一个克隆 (使用 tee)
-		else {
-			// console.log("Generic Proxy: Body not pre-parsed, returning teed stream.");
-			const [stream1, _stream2] = ctx.originalRequest.body.tee();
-			return stream1;
-		}
+		// 通用代理总是透传原始 Body 流
+		return ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD'
+			? null
+			: ctx.originalRequest.body; // 直接返回原始流
 	}
 }
 
@@ -710,8 +686,6 @@ const determineRequestType = async (
 				parsedBody = null; // 确保解析失败时为 null
 			}
 		}
-		// 使用导入的 isVertexModel 函数进行判断
-		// isVertexModel 现在从缓存读取
 		const isVertex = isVertexModel(model); // 使用 replacekeys.ts 中的函数 (内部已用缓存)
 		return {
 			type: isVertex ? RequestType.VERTEX_AI : RequestType.GEMINI_OPENAI, // 使用判断结果
@@ -741,11 +715,6 @@ const getStrategy = (type: RequestType): RequestHandlerStrategy => {
 
 // === 主处理函数  ===
 export const handleGenericProxy = async (c: Context): Promise<Response> => {
-	// 确保首次请求时加载 GCP 凭证 (如果尚未加载)
-	// 注意：这个检查现在移到了 getGcpAuth 内部，这里不需要重复检查
-	// if (!gcpCredsLoaded) {
-	// 	await loadAndCacheGcpCreds();
-	// }
 
 	const req = c.req.raw;
 	const url = new URL(req.url);
@@ -763,7 +732,7 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 		originalRequest: req, // 传递原始请求对象
 		path,
 		prefix,
-		parsedBody // 传递预解析的 Body (可能为 undefined 或 null)
+		parsedBody 
 	};
 
 	// 重试循环
@@ -789,9 +758,6 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 			// 4. 处理 Body (可能返回 Stream)
 			const targetBody = await strategy.processRequestBody(strategyContext);
 
-					 // 移除手动设置 Content-Type 和 Content-Length 的逻辑
-					 // fetch 会自动处理 ReadableStream 的 Headers
-
 			// 5. 执行 Fetch
 			const res = await fetch(targetUrl, {
 				method: req.method,
@@ -807,7 +773,7 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 					finalResponse = await strategy.handleResponse(res, strategyContext);
 				}
 
-				// 直接返回上游响应 (或处理后的响应)，依赖 Hono/Deno 进行流式传输
+				// 直接返回上游响应 依赖 Hono/Deno 进行流式传输
 				return finalResponse;
 			} else {
 				lastError = res; // 保存原始错误以备最终返回
