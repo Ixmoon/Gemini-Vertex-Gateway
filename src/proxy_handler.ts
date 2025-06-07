@@ -808,20 +808,24 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 				// 直接返回上游响应 依赖 Hono/Deno 进行流式传输
 				return finalResponse;
 			} else {
-				// 响应不成功时，确保消费响应体以释放资源
-				await res.arrayBuffer().catch(() => {});
+				// 响应不成功时
 				lastError = res; // 保存原始错误以备最终返回
+				if (attempts < maxRetries) { // 仅在非最后一次尝试时消费 body
+					await res.arrayBuffer().catch(() => {}); // 消费响应体以释放资源
+				}
 				console.warn(`Attempt ${attempts}/${maxRetries} failed for ${RequestType[type]} ${targetUrl}: ${res.status} ${res.statusText}`);
 			}
 
 		} catch (err) {
 			console.error(`Attempt ${attempts}/${maxRetries} caught error for ${RequestType[type]}:`, err);
 			if (err instanceof Response) {
-				// 如果捕获到的是 Response 对象，也确保消费响应体以释放资源
-				await err.arrayBuffer().catch(() => {});
 				lastError = err; // 捕获到的是 Response 对象 (例如策略抛出的错误)，保存并继续重试
+				if (attempts < maxRetries) { // 仅在非最后一次尝试时消费 body
+					// 如果捕获到的是 Response 对象，也确保消费响应体以释放资源
+					await err.arrayBuffer().catch(() => {});
+				}
 			} else {
-				throw err;// 捕获到非 Response 错误（如网络错误），直接重新抛出
+				throw err; // 捕获到非 Response 错误（如网络错误），直接重新抛出
 			}
 			// 只有 Response 错误会继续循环，非 Response 错误已抛出
 		}
