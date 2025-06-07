@@ -85,16 +85,16 @@ export const DEFAULT_CACHE_TTL = 5 * 60 * 1000; // 300,000 毫秒
 
 // --- 所有需要预加载的 KV 键数组 (Deno.KvKey[]) ---
 const PRELOAD_KV_KEYS: Deno.KvKey[] = [
-	ADMIN_PASSWORD_HASH_KEY,
-	TRIGGER_KEYS_KEY,
-	POOL_KEYS_KEY,
-	FALLBACK_KEY_KEY,
-	FALLBACK_MODELS_KEY,
-	API_RETRY_LIMIT_KEY,
-	API_MAPPINGS_KEY,
-	GCP_CREDENTIALS_STRING_KEY,
-	GCP_DEFAULT_LOCATION_KEY,
-	VERTEX_MODELS_KEY,
+	["admin_password_hash"],
+	["trigger_keys"],
+	["pool_keys"],
+	["fallback_key"],
+	["fallback_models"],
+	["api_retry_limit"],
+	["api_mappings"],
+	["gcp_credentials_string"],
+	["gcp_default_location"],
+	["vertex_models"],
 ];
 
 // --- 默认值映射 (用于处理 KV 中不存在的键) ---
