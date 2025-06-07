@@ -210,16 +210,16 @@ export async function initializeAndCacheGcpAuth(): Promise<void> {
 	console.log("Initializing GCP Auth instances...");
 	const jsonStr = globalCache.get<string | null>(CACHE_KEYS.GCP_CREDENTIALS_STRING);
 
-	if (!jsonStr) {
-		console.log("No GCP credentials string found in cache. Clearing Auth instances cache.");
-		globalCache.set(CACHE_KEYS.GCP_AUTH_INSTANCES, []); // 存入空数组
-		return;
-	}
-
 	try {
+		if (!jsonStr) {
+			console.log("No GCP credentials string found in cache. Clearing Auth instances cache.");
+			globalCache.set(CACHE_KEYS.GCP_AUTH_INSTANCES, []); // 存入空数组
+			return;
+		}
+
 		const creds: GcpCredentials[] = parseCreds(jsonStr); // 使用 replacekeys 中的解析函数
 		if (!creds || creds.length === 0) {
-			console.warn("Parsed GCP credentials string resulted in zero valid credentials.");
+			console.warn("Parsed GCP credentials string resulted in zero valid credentials. Clearing Auth instances cache.");
 			globalCache.set(CACHE_KEYS.GCP_AUTH_INSTANCES, []); // 存入空数组
 			return;
 		}
