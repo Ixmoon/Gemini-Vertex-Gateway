@@ -535,26 +535,11 @@ class GeminiNativeStrategy implements RequestHandlerStrategy {
 			   //// console.log("Gemini Native using path for model");
 			modelNameForKeyLookup = match[1];
 		}
-		// 如果路径中没有，则尝试从 Body 获取
-		else {
-			   // 优先使用预解析的 Body 中的 model
-			   if (ctx.parsedBody && typeof ctx.parsedBody === 'object' && ctx.parsedBody !== null) {
-			    //// console.log("Gemini Native using pre-parsed body for model");
-			    modelNameForKeyLookup = ctx.parsedBody.model ?? null;
-			   }
-			   // 如果没有预解析的 Body，并且请求可能有 Body，则尝试解析克隆的请求
-			   else if (ctx.parsedBody === undefined && ctx.originalRequest.body && ctx.originalRequest.method !== 'GET' && ctx.originalRequest.method !== 'HEAD') {
-			    try {
-			     //// console.log("Gemini Native parsing cloned request for model");
-			     const clonedRequest = ctx.originalRequest.clone();
-			     const body = await clonedRequest.json();
-					   modelNameForKeyLookup = body?.model ?? null;
-				   } catch (e) {
-					   console.warn("Gemini Native getAuth: Failed to parse cloned body for model name:", e);
-					   // 解析失败，继续，modelNameForKeyLookup 为 null
-				   }
-			   }
-		   }
+		// 如果路径中没有模型，我们就不再尝试从 Body 中解析它，
+		// 因为这可能导致流被锁定。直接传递 null 给 _getGeminiAuthenticationDetails。
+		// else {
+		//    // Removed body parsing logic to avoid locking the stream
+		// }
 
 		// 调用公共辅助函数获取认证详情
 		return await _getGeminiAuthenticationDetails(c, modelNameForKeyLookup, attempt, "Gemini Native");
