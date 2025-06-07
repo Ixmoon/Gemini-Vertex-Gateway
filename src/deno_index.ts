@@ -16,7 +16,15 @@ import {
 } from "./replacekeys.ts";
 // --- 导入新的代理处理模块 ---
 // Remove apiMapping import as it's no longer exported/used from proxy_handler
-import { handleGenericProxy, loadGcpCreds } from "./proxy_handler.ts";
+// Import caching functions
+import {
+	handleGenericProxy,
+	loadAndCacheGcpCreds, // Use cached loader
+	invalidateGcpCredsCache // Import invalidation function
+} from "./proxy_handler.ts";
+// Import cache invalidation for mappings (assuming it's added to replacekeys.ts)
+// Note: Need to add invalidateApiMappingsCache to replacekeys.ts if not already present
+// import { invalidateApiMappingsCache } from "./replacekeys.ts"; // No longer needed, handled by reloadKvConfig in setters
 
 // --- 辅助函数 (非代理相关) ---
 /** 创建 JSON 错误响应 */
@@ -193,13 +201,17 @@ manageApi.post('/retry-limit', async (c) => {
 // GCP Credentials 路由 (仅设置，不获取)
 manageApi.post('/gcp-credentials', async (c) => {
 	const { credentials } = await c.req.json();
-	return handleManageApiCall(() => kvOps.setGcpCredentialsString(credentials ?? null), "GCP credentials updated.", "Failed to set GCP credentials");
+	return handleManageApiCall(async () => {
+		await kvOps.setGcpCredentialsString(credentials ?? null);
+		invalidateGcpCredsCache(); // Invalidate cache on successful update
+	}, "GCP credentials updated.", "Failed to set GCP credentials");
 });
 manageApi.get('/gcp-credentials', (c) => handleManageApiCall(
 	async () => ({ credentials: await kvOps.getGcpCredentialsString() }), // 假设 kvOps 中有此函数
 	() => "GCP credentials fetched successfully.",
 	"Failed to get GCP credentials"
 ));
+// Note: No cache invalidation needed for GET, but POST needs it.
 
 // GCP Default Location 路由
 manageApi.get('/gcp-location', (c) => handleManageApiCall(
@@ -247,10 +259,16 @@ manageApi.post('/api-mappings', async (c) => {
 		return createErrorPayload("Invalid input: mappings must be an object.", 400);
 	}
 	// TODO: 可以添加更严格的验证，例如检查键和值是否都是字符串
-	return handleManageApiCall(() => setApiMappings(mappings), "API mappings updated.", "Failed to set API mappings");
+	return handleManageApiCall(async () => {
+		await setApiMappings(mappings);
+		// invalidateApiMappingsCache(); // No longer needed, handled by setApiMappings internally via reloadKvConfig
+	}, "API mappings updated.", "Failed to set API mappings");
 });
 manageApi.delete('/api-mappings', (c) => handleManageApiCall(
-	clearApiMappings,
+	async () => {
+		await clearApiMappings();
+		// invalidateApiMappingsCache(); // No longer needed, handled by clearApiMappings internally via reloadKvConfig
+	},
 	"API mappings cleared.",
 	"Failed to clear API mappings"
 ));
@@ -299,9 +317,9 @@ if (portFromEnv) { // 检查是否存在
 	} catch (e) { /* Ignore parse error */ }
 }
 
-// 在启动前初始化 KV 和加载 GCP 凭证 (使用导入的函数)
+// 在启动前初始化 KV 和加载/缓存 GCP 凭证 (使用导入的函数)
 await kvOps.openKv();
-await loadGcpCreds(); // 加载 GCP 凭证
+await loadAndCacheGcpCreds(); // 加载并缓存 GCP 凭证
 
 // 启动服务器
 Deno.serve({ port }, app.fetch);

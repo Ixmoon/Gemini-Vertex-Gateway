@@ -1,25 +1,46 @@
+// --- 导入缓存模块 ---
+import { globalCache, CACHE_KEYS, reloadKvConfig, initializeAndCacheGcpAuth } from "./cache.ts"; // Import reloadKvConfig
+
 // --- 类型定义 ---
-export type ApiKeySource = 'user' | 'fallback' | 'pool'; // 导出 Key 来源类型
-export type ApiKeyResult = { key: string; source: ApiKeySource }; // 定义并导出 ApiKeyResult 类型
-// --- KV 键常量 ---
-const ADMIN_PASSWORD_HASH_KEY = ["admin_password_hash"];
-const TRIGGER_KEYS_KEY = ["trigger_keys"]; // 存储为 string[]，逻辑上视为 Set
-const POOL_KEYS_KEY = ["pool_keys"]; // string[]
-const POOL_KEY_ATOMIC_INDEX_KEY = ["pool_key_atomic_index"]; // 新的原子计数器键 (BigInt)
-export const GCP_CREDENTIAL_ATOMIC_INDEX_KEY = ["gcp_credential_atomic_index"]; // GCP 凭证原子计数器键 (BigInt)
-const FALLBACK_KEY_KEY = ["fallback_key"]; // string | null
-const GCP_CREDENTIALS_STRING_KEY = ["gcp_credentials_string"]; // 存储 GCP JSON 凭证完整字符串
-const GCP_DEFAULT_LOCATION_KEY = ["gcp_default_location"]; // 存储默认 GCP Location
-const VERTEX_MODELS_KEY = ["vertex_models"]; // 触发 Vertex AI 代理的模型列表 (string[])
-const FALLBACK_MODELS_KEY = ["fallback_models"]; // string[]，逻辑上视为 Set
-const API_RETRY_LIMIT_KEY = ["api_retry_limit"]; // number | null (用户可配置的最大 API 重试次数)
-const API_MAPPINGS_KEY = ["api_mappings"]; // 存储 API 路径映射 (Record<string, string>)
+export type ApiKeySource = 'user' | 'fallback' | 'pool';
+export type ApiKeyResult = { key: string; source: ApiKeySource };
+
+// Gcp凭证定义 (Moved from proxy_handler.ts)
+export interface GcpCredentials {
+	type: string;
+	project_id: string;
+	private_key_id: string;
+	private_key: string;
+	client_email: string;
+	client_id?: string;
+	auth_uri?: string;
+	token_uri?: string;
+	auth_provider_x509_cert_url?: string;
+	client_x509_cert_url?: string;
+	universe_domain?: string;
+	[key: string]: any;
+}
+
+// --- KV 键常量 (Export all) ---
+export const ADMIN_PASSWORD_HASH_KEY = ["admin_password_hash"];
+export const TRIGGER_KEYS_KEY = ["trigger_keys"];
+export const POOL_KEYS_KEY = ["pool_keys"];
+export const POOL_KEY_ATOMIC_INDEX_KEY = ["pool_key_atomic_index"];
+export const GCP_CREDENTIAL_ATOMIC_INDEX_KEY = ["gcp_credential_atomic_index"];
+export const FALLBACK_KEY_KEY = ["fallback_key"];
+export const GCP_CREDENTIALS_STRING_KEY = ["gcp_credentials_string"];
+export const GCP_DEFAULT_LOCATION_KEY = ["gcp_default_location"];
+export const VERTEX_MODELS_KEY = ["vertex_models"];
+export const FALLBACK_MODELS_KEY = ["fallback_models"];
+export const API_RETRY_LIMIT_KEY = ["api_retry_limit"];
+export const API_MAPPINGS_KEY = ["api_mappings"];
+
+// --- 内存缓存 (Remove old variables) ---
+// let cachedApiMappings: Record<string, string> | null = null; // Removed
+
 // --- KV 实例管理 ---
 let kv: Deno.Kv | null = null;
 
-/**
- * 打开或获取 KV 存储实例 (异步)
- */
 export async function openKv(): Promise<Deno.Kv> {
 	if (!kv) {
 		kv = await Deno.openKv();
@@ -27,10 +48,8 @@ export async function openKv(): Promise<Deno.Kv> {
 	return kv;
 }
 
-/**
- * 确保 KV 实例已初始化 (同步)
- */
-function ensureKv(): Deno.Kv {
+/** [内部] 确保 KV 实例已初始化 (同步) - Exported */
+export function ensureKv(): Deno.Kv {
 	if (!kv) {
 		throw new Error("Deno KV store is not open. Call openKv() first.");
 	}
@@ -57,23 +76,23 @@ async function verifyPassword(password: string, storedHash: string): Promise<boo
 
 // --- 管理员密码 KV 操作 (保持不变) ---
 
-export async function setAdminPassword(password: string): Promise<void> { /* ... Sames as before ... */
+export async function setAdminPassword(password: string): Promise<void> {
 	const kv = ensureKv();
 	if (!password || typeof password !== 'string' || password.length < 8) {
-	throw new Error("Password must be a string of at least 8 characters.");
+		throw new Error("Password must be a string of at least 8 characters.");
 	}
 	const newHash = await hashPassword(password);
 	await kv.set(ADMIN_PASSWORD_HASH_KEY, newHash);
+	await reloadKvConfig(ADMIN_PASSWORD_HASH_KEY); // Reload cache
 }
 
-export async function getAdminPasswordHash(): Promise<string | null> { /* ... Sames as before ... */
-	const kv = ensureKv();
-	const result = await kv.get<string>(ADMIN_PASSWORD_HASH_KEY);
-	return result.value;
+// [重构] 从缓存获取管理员密码哈希
+export function getAdminPasswordHash(): string | null {
+	return globalCache.get<string | null>(CACHE_KEYS.ADMIN_PASSWORD_HASH) ?? null;
 }
 
-export async function verifyAdminPassword(password: string): Promise<boolean> { /* ... Sames as before ... */
-	const storedHash = await getAdminPasswordHash();
+export async function verifyAdminPassword(password: string): Promise<boolean> {
+	const storedHash = getAdminPasswordHash(); // Read from cache
 	if (!storedHash) {
 		return false;
 	}
@@ -83,64 +102,75 @@ export async function verifyAdminPassword(password: string): Promise<boolean> { 
 
 // --- 内部通用 KV 助手函数 ---
 
-/** [内部] 获取任意类型的单个 KV 值 */
-async function _getKvValue<T>(key: string[]): Promise<T | null> {
+/** [内部] 获取任意类型的单个 KV 值 - Exported */
+export async function _getKvValue<T>(key: Deno.KvKey): Promise<T | null> {
 	const kv = ensureKv();
 	const result = await kv.get<T>(key);
-	return result.value ?? null; // Return null if value is null or undefined
+	return result.value ?? null;
 }
 
 /** [内部] 设置任意类型的单个 KV 值 */
-async function _setKvValue<T>(key: string[], value: T): Promise<void> {
+async function _setKvValue<T>(key: Deno.KvKey, value: T): Promise<void> {
 	const kv = ensureKv();
 	await kv.set(key, value);
+	// Reload cache after setting
+	await reloadKvConfig(key);
 }
 
 /** [内部] 删除任意 KV 键 */
-async function _deleteKvKey(key: string[]): Promise<void> {
+async function _deleteKvKey(key: Deno.KvKey): Promise<void> {
 	const kv = ensureKv();
 	await kv.delete(key);
+	// Reload cache after deleting (will set default value)
+	await reloadKvConfig(key);
 }
 
-/** [内部] 从 KV 获取字符串列表 */
-async function _getList(key: string[]): Promise<string[]> {
+/** [内部] 从 KV 获取字符串列表 - Exported */
+export async function _getList(key: Deno.KvKey): Promise<string[]> {
+	// Note: This is still needed for atomic operations/direct KV interactions if any remain
 	return (await _getKvValue<string[]>(key)) || [];
 }
 
 /** [内部] 向 KV 中存储的列表（视为 Set）添加单个唯一字符串 */
-async function _addItemToSet(key: string[], item: string): Promise<boolean> {
+async function _addItemToSet(key: Deno.KvKey, item: string): Promise<boolean> {
 	const trimmedItem = item?.trim();
 	if (!trimmedItem) {
 		throw new Error("Item cannot be empty.");
 	}
+	// Read directly from KV for check-then-set logic
 	const currentList = await _getList(key);
 	const currentSet = new Set(currentList);
 	if (!currentSet.has(trimmedItem)) {
 		currentList.push(trimmedItem);
-		await _setKvValue(key, currentList);
+		const kv = ensureKv();
+		await kv.set(key, currentList); // Direct set, then reload
+		await reloadKvConfig(key);
 		return true; // Added
 	}
 	return false; // Already exists
 }
 
 /** [内部] 从 KV 中存储的列表中移除单个字符串 */
-async function _removeItemFromList(key: string[], item: string): Promise<boolean> {
+async function _removeItemFromList(key: Deno.KvKey, item: string): Promise<boolean> {
 	const trimmedItem = item?.trim();
 	if (!trimmedItem) {
 		throw new Error("Item cannot be empty.");
 	}
+	// Read directly from KV for check-then-set logic
 	let currentList = await _getList(key);
 	const initialLength = currentList.length;
 	currentList = currentList.filter(i => i !== trimmedItem);
 	if (currentList.length < initialLength) {
-		await _setKvValue(key, currentList);
+		const kv = ensureKv();
+		await kv.set(key, currentList); // Direct set, then reload
+		await reloadKvConfig(key);
 		return true; // Removed
 	}
 	return false; // Not found
 }
 
 /** [内部] 批量向 KV 列表添加项目 (去重) */
-async function _addItemsToList(key: string[], itemsToAdd: string[], listName: string): Promise<void> {
+async function _addItemsToList(key: Deno.KvKey, itemsToAdd: string[], listName: string): Promise<void> {
 	if (!Array.isArray(itemsToAdd)) {
 		throw new Error(`${listName} must be an array of strings.`);
 	}
@@ -159,86 +189,79 @@ async function _addItemsToList(key: string[], itemsToAdd: string[], listName: st
 		}
 	}
 	if (addedCount > 0) {
-		await _setKvValue(key, currentList);
+		const kv = ensureKv();
+		await kv.set(key, currentList); // Direct set, then reload
+		await reloadKvConfig(key);
 	}
 }
 
 /** [内部] 清空 KV 中的列表 */
-async function _clearList(key: string[], _listName: string): Promise<void> {
-	await _deleteKvKey(key);
-}
-
-/** [内部] 检查模型名称是否存在于指定的 KV 列表（Set）中 */
-async function _isModelInKvList(modelName: string | null, listKey: string[]): Promise<boolean> {
-	if (!modelName) {
-		return false;
-	}
-	const modelList = await _getList(listKey); // 获取列表
-	const modelSet = new Set(modelList);	   // 转换为 Set 以优化查找
-	return modelSet.has(modelName.trim());	// 检查是否存在 (已去空格)
+async function _clearList(key: Deno.KvKey, _listName: string): Promise<void> {
+	await _deleteKvKey(key); // Deletes key and reloads cache with default
 }
 
 // --- 触发密钥管理 ---
 
-/** 获取所有触发密钥 (Set) */
-export async function getTriggerKeys(): Promise<Set<string>> {
-	return new Set(await _getList(TRIGGER_KEYS_KEY));
+// [重构] 从缓存获取触发密钥 (Set)
+export function getTriggerKeys(): Set<string> {
+	const keys = globalCache.get<string[]>(CACHE_KEYS.TRIGGER_KEYS);
+	return new Set(keys || []); // Ensure it returns a Set even if cache is empty/null
 }
 
-/** 添加触发密钥 */
+// [重构] 添加触发密钥 (更新 KV 并重载缓存)
 export async function addTriggerKey(key: string): Promise<void> {
 	await _addItemToSet(TRIGGER_KEYS_KEY, key);
 }
 
-/** 删除触发密钥 */
+// [重构] 删除触发密钥 (更新 KV 并重载缓存)
 export async function removeTriggerKey(key: string): Promise<void> {
 	await _removeItemFromList(TRIGGER_KEYS_KEY, key);
 }
 
-// 检查触发密钥的逻辑本身不变，但依赖的 getTriggerKeys 已被重构
-export async function isTriggerKey(providedKey: string): Promise<boolean> {
+// [重构] 检查触发密钥 (从缓存读取)
+export function isTriggerKey(providedKey: string): boolean {
 	if (!providedKey) return false;
-	const triggerKeys = await getTriggerKeys(); // Uses refactored getter
+	const triggerKeys = getTriggerKeys(); // Uses refactored getter (reads from cache)
 	return triggerKeys.has(providedKey.trim());
 }
 
 
 // --- 主密钥池管理 ---
 
-/** 获取主密钥池中的所有密钥 (Array) */
-export async function getPoolKeys(): Promise<string[]> {
-	return await _getList(POOL_KEYS_KEY);
+// [重构] 获取主密钥池中的所有密钥 (Array) (从缓存读取)
+export function getPoolKeys(): string[] {
+	return globalCache.get<string[]>(CACHE_KEYS.POOL_KEYS) || [];
 }
 
-/** 添加一个或多个密钥到主密钥池 */
+// [重构] 添加一个或多个密钥到主密钥池 (更新 KV 并重载缓存)
 export async function addPoolKeys(keys: string[]): Promise<void> {
 	await _addItemsToList(POOL_KEYS_KEY, keys, 'Pool Keys');
 }
 
-/** 从主密钥池中删除一个密钥 */
+// [重构] 从主密钥池中删除一个密钥 (更新 KV 并重载缓存)
 export async function removePoolKey(key: string): Promise<void> {
 	await _removeItemFromList(POOL_KEYS_KEY, key);
-	// 注意：不再需要重置旧索引。原子计数器不受列表长度变化直接影响。
-	// 如果需要严格的索引重置，可以在这里删除原子计数器键，但这通常不是轮换模式所必需的。
+	// 原子计数器不受影响
 }
 
-/** 清空主密钥池中的所有密钥 */
+// [重构] 清空主密钥池中的所有密钥 (更新 KV 并重载缓存, 删除原子计数器)
 export async function clearPoolKeys(): Promise<void> {
-	await _clearList(POOL_KEYS_KEY, 'Pool Keys');
-	await _deleteKvKey(POOL_KEY_ATOMIC_INDEX_KEY); // 删除原子计数器键
-	////console.log("Pool key atomic index cleared.");
+	await _clearList(POOL_KEYS_KEY, 'Pool Keys'); // Deletes key and reloads cache
+	const kv = ensureKv();
+	await kv.delete(POOL_KEY_ATOMIC_INDEX_KEY); // Delete atomic counter separately
+	console.log("Pool key list cleared from cache. Pool key atomic index deleted from KV.");
 }
 
-// [已重构] 获取下一个密钥池密钥 (使用原子计数器轮换)
+// [重构] 获取下一个密钥池密钥 (从缓存读取列表, KV 原子操作)
 export async function getNextPoolKey(): Promise<string | null> {
-	const kv = ensureKv();
-	const poolKeys = await getPoolKeys();
+	const poolKeys = getPoolKeys(); // Read list from cache
 
 	if (poolKeys.length === 0) {
 		////console.warn("Pool key requested but pool is empty.");
 		return null;
 	}
 
+	const kv = ensureKv(); // Ensure KV is initialized
 	// 原子递增计数器并获取新值
 	// 原子递增计数器
 	const atomicIncRes = await kv.atomic().sum(POOL_KEY_ATOMIC_INDEX_KEY, 1n).commit();
@@ -275,12 +298,12 @@ export async function getNextPoolKey(): Promise<string | null> {
 
 // --- 指定密钥 (Fallback Key) 管理 ---
 
-/** 获取指定密钥 */
-export async function getFallbackKey(): Promise<string | null> {
-	return await _getKvValue<string>(FALLBACK_KEY_KEY);
+// [重构] 获取指定密钥 (从缓存读取)
+export function getFallbackKey(): string | null {
+	return globalCache.get<string | null>(CACHE_KEYS.FALLBACK_KEY) ?? null;
 }
 
-/** 设置指定密钥 (留空或 null 以清除) */
+// [重构] 设置指定密钥 (更新 KV 并重载缓存)
 export async function setFallbackKey(key: string | null): Promise<void> {
 	const trimmedKey = key?.trim();
 	if (trimmedKey && trimmedKey.length > 0) {
@@ -293,17 +316,18 @@ export async function setFallbackKey(key: string | null): Promise<void> {
 
 // --- 指定密钥触发模型 (Fallback Models) 管理 ---
 
-/** 获取触发指定密钥的模型列表 (Set) */
-export async function getFallbackModels(): Promise<Set<string>> {
-	return new Set(await _getList(FALLBACK_MODELS_KEY));
+// [重构] 获取触发指定密钥的模型列表 (Set) (从缓存读取)
+export function getFallbackModels(): Set<string> {
+	const models = globalCache.get<string[]>(CACHE_KEYS.FALLBACK_MODELS);
+	return new Set(models || []);
 }
 
-/** 添加一个或多个模型到触发指定密钥的模型列表 */
+// [重构] 添加一个或多个模型到触发指定密钥的模型列表 (更新 KV 并重载缓存)
 export async function addFallbackModels(models: string[]): Promise<void> {
 	await _addItemsToList(FALLBACK_MODELS_KEY, models, 'Fallback Models');
 }
 
-/** 清空触发指定密钥的模型列表 */
+// [重构] 清空触发指定密钥的模型列表 (更新 KV 并重载缓存)
 export async function clearFallbackModels(): Promise<void> {
 	await _clearList(FALLBACK_MODELS_KEY, 'Fallback Models');
 }
@@ -311,53 +335,88 @@ export async function clearFallbackModels(): Promise<void> {
 
 // --- API 重试次数管理 ---
 
-/**
- * 获取 API 调用最大重试次数 (默认 3)
- */
-export async function getApiRetryLimit(): Promise<number> {
-	const kv = ensureKv();
-	const result = await kv.get<number>(API_RETRY_LIMIT_KEY);
-	const limit = result.value;
-	// 如果未设置、不是数字或小于 1，则返回默认值 3
-	if (limit === null || typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1) {
-		return 3; // 默认值
-	}
-	return limit;
+// [重构] 获取 API 调用最大重试次数 (从缓存读取)
+export function getApiRetryLimit(): number {
+	// Use the default from cache.ts if cache returns undefined
+	return globalCache.get<number>(CACHE_KEYS.API_RETRY_LIMIT) ?? 3;
 }
 
-/**
- * 设置 API 调用最大重试次数
- */
+// [重构] 设置 API 调用最大重试次数 (更新 KV 并重载缓存)
 export async function setApiRetryLimit(limit: number): Promise<void> {
-	const kv = ensureKv();
 	if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1) {
 		throw new Error("API retry limit must be a positive integer.");
 	}
-	await kv.set(API_RETRY_LIMIT_KEY, limit);
+	await _setKvValue(API_RETRY_LIMIT_KEY, limit);
 }
 
 
 // --- GCP 凭证字符串管理 ---
 
-/** 设置 GCP 凭证字符串 */
-export async function setGcpCredentialsString(credentials: string): Promise<void> {
+// [重构] 设置 GCP 凭证字符串 (更新 KV 并重载缓存, 触发 Auth 重建)
+export async function setGcpCredentialsString(credentials: string | null): Promise<void> {
 	const trimmedCredentials = credentials?.trim();
 	if (trimmedCredentials && trimmedCredentials.length > 0) {
-		await _setKvValue(GCP_CREDENTIALS_STRING_KEY, trimmedCredentials);
+		// Directly set value in KV, reloadKvConfig will handle cache & auth rebuild
+		const kv = ensureKv();
+		await kv.set(GCP_CREDENTIALS_STRING_KEY, trimmedCredentials);
+		await reloadKvConfig(GCP_CREDENTIALS_STRING_KEY);
 	} else {
-		await _deleteKvKey(GCP_CREDENTIALS_STRING_KEY);
+		// Directly delete key in KV, reloadKvConfig will handle cache & auth rebuild
+		const kv = ensureKv();
+		await kv.delete(GCP_CREDENTIALS_STRING_KEY);
+		await reloadKvConfig(GCP_CREDENTIALS_STRING_KEY);
 	}
 }
 
-/** 获取 GCP 凭证字符串 */
-export async function getGcpCredentialsString(): Promise<string | null> {
-	return await _getKvValue<string>(GCP_CREDENTIALS_STRING_KEY);
+// [重构] 获取 GCP 凭证字符串 (从缓存读取)
+export function getGcpCredentialsString(): string | null {
+	return globalCache.get<string | null>(CACHE_KEYS.GCP_CREDENTIALS_STRING) ?? null;
 }
+
+// --- GCP 凭证解析 (Moved from proxy_handler.ts) ---
+const isValidCred = (cred: any): cred is GcpCredentials =>
+	cred?.type &&
+	cred?.project_id &&
+	cred?.private_key_id &&
+	cred?.private_key &&
+	cred?.client_email;
+
+export const parseCreds = (jsonStr: string): GcpCredentials[] => {
+	try {
+		const p = JSON.parse(jsonStr);
+		if (Array.isArray(p)) {
+			return p.filter(isValidCred);
+		}
+	} catch { /* 忽略第一个解析错误 */ }
+
+	try {
+		let f = jsonStr.trim();
+		if (!f.startsWith('[')) {
+			f = `[${f.replace(/}\s*{/g, '},{')}]`;
+		}
+		const p = JSON.parse(f);
+		if (Array.isArray(p)) {
+			return p.filter(isValidCred);
+		}
+	} catch { /* 忽略第二个解析错误 */ }
+
+	return (jsonStr.match(/\{(?:[^{}]|{[^{}]*})*\}/g) || [])
+		.map(s => {
+			try {
+				const p = JSON.parse(s.trim());
+				return isValidCred(p) ? p : null;
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean) as GcpCredentials[];
+};
+
 
 // --- GCP 默认 Location 管理 ---
 
-/** 设置默认 GCP Location */
-export async function setGcpDefaultLocation(location: string): Promise<void> {
+// [重构] 设置默认 GCP Location (更新 KV 并重载缓存)
+export async function setGcpDefaultLocation(location: string | null): Promise<void> {
 	const trimmedLocation = location?.trim();
 	if (trimmedLocation && trimmedLocation.length > 0) {
 		await _setKvValue(GCP_DEFAULT_LOCATION_KEY, trimmedLocation);
@@ -366,85 +425,93 @@ export async function setGcpDefaultLocation(location: string): Promise<void> {
 	}
 }
 
-/** 获取默认 GCP Location (默认 'global') */
-export async function getGcpDefaultLocation(): Promise<string> {
-	const location = await _getKvValue<string>(GCP_DEFAULT_LOCATION_KEY);
-	return location || 'global'; // 如果未设置或为空，则返回 'global'
+// [重构] 获取默认 GCP Location (从缓存读取)
+export function getGcpDefaultLocation(): string {
+	// Use the default from cache.ts if cache returns undefined
+	return globalCache.get<string>(CACHE_KEYS.GCP_DEFAULT_LOCATION) ?? 'global';
 }
 
 
 // --- Vertex AI 模型列表管理 ---
 
-/** 获取触发 Vertex AI 代理的模型列表 (Set) */
-export async function getVertexModels(): Promise<Set<string>> {
-	return new Set(await _getList(VERTEX_MODELS_KEY));
+// [重构] 获取触发 Vertex AI 代理的模型列表 (Set) (从缓存读取)
+export function getVertexModels(): Set<string> {
+	const models = globalCache.get<string[]>(CACHE_KEYS.VERTEX_MODELS);
+	return new Set(models || []);
 }
 
-/** 添加一个或多个模型到触发 Vertex AI 代理的模型列表 */
+// [重构] 添加一个或多个模型到触发 Vertex AI 代理的模型列表 (更新 KV 并重载缓存)
 export async function addVertexModels(models: string[]): Promise<void> {
 	await _addItemsToList(VERTEX_MODELS_KEY, models, 'Vertex Models');
 }
 
-/** 清空触发 Vertex AI 代理的模型列表 */
+// [重构] 清空触发 Vertex AI 代理的模型列表 (更新 KV 并重载缓存)
 export async function clearVertexModels(): Promise<void> {
 	await _clearList(VERTEX_MODELS_KEY, 'Vertex Models');
 }
 
-/** 检查模型名称是否属于 Vertex AI 模型列表 */
-export async function isVertexModel(modelName: string | null): Promise<boolean> {
-	return await _isModelInKvList(modelName, VERTEX_MODELS_KEY); // 调用通用辅助函数
+// [重构] 检查模型名称是否属于 Vertex AI 模型列表 (从缓存读取)
+export function isVertexModel(modelName: string | null): boolean {
+	if (!modelName) return false;
+	const vertexModels = getVertexModels(); // 使用缓存化的 getter
+	return vertexModels.has(modelName.trim());
 }
+
 // --- API 路径映射管理 ---
 
-/** 获取 API 路径映射 */
-export async function getApiMappings(): Promise<Record<string, string>> {
-	const mappings = await _getKvValue<Record<string, string>>(API_MAPPINGS_KEY);
-	return mappings || {}; // 如果 KV 中不存在或为 null，返回空对象
+// [重构] 获取 API 路径映射 (从缓存读取)
+export function getApiMappings(): Record<string, string> {
+	return globalCache.get<Record<string, string>>(CACHE_KEYS.API_MAPPINGS) || {};
 }
 
-/** 设置 API 路径映射 */
+// [重构] 设置 API 路径映射 (更新 KV 并重载缓存)
 export async function setApiMappings(mappings: Record<string, string>): Promise<void> {
 	if (typeof mappings !== 'object' || mappings === null) {
 		throw new Error("Mappings must be a non-null object.");
 	}
-	// 可以添加更严格的验证，例如检查键和值是否都是字符串
 	await _setKvValue(API_MAPPINGS_KEY, mappings);
 }
 
-/** 清空 API 路径映射 */
+// [重构] 清空 API 路径映射 (更新 KV 并重载缓存)
 export async function clearApiMappings(): Promise<void> {
 	await _deleteKvKey(API_MAPPINGS_KEY);
 }
 
-// --- 核心 API 密钥选择逻辑 ---
+// --- 核心 API 密钥选择逻辑 (使用重构后的缓存读取函数) ---
 
-/** 检查模型名称是否属于 Fallback 模型列表 */
-export async function isFallbackModel(modelName: string | null): Promise<boolean> {
-	return await _isModelInKvList(modelName, FALLBACK_MODELS_KEY); // 调用通用辅助函数
+// [重构] 检查模型名称是否属于 Fallback 模型列表 (从缓存读取)
+export function isFallbackModel(modelName: string | null): boolean {
+	if (!modelName) return false;
+	const fallbackModels = getFallbackModels(); // 使用缓存化的 getter
+	return fallbackModels.has(modelName.trim());
 }
+
+// [重构] 获取请求的 API Key (依赖缓存和原子操作)
 export async function getApiKeyForRequest(
 	userProvidedKey: string | null,
 	modelName: string | null
-): Promise<ApiKeyResult | null> { // 使用导出的 ApiKeyResult 类型
+): Promise<ApiKeyResult | null> {
 	if (!userProvidedKey) {
 		return null;
 	}
 
-	const isKeyTrigger = await isTriggerKey(userProvidedKey); // Uses refactored isTriggerKey
+	// isTriggerKey now reads from cache
+	const isKeyTrigger = isTriggerKey(userProvidedKey);
 
 	if (!isKeyTrigger) {
 		return { key: userProvidedKey, source: 'user' };
 	}
 
-	// 使用新的 isFallbackModel 函数检查
-	if (await isFallbackModel(modelName)) {
-		const fallbackKey = await getFallbackKey(); // 获取 Fallback Key
+	// isFallbackModel now reads from cache
+	if (isFallbackModel(modelName)) {
+		const fallbackKey = getFallbackKey(); // Reads from cache
 		if (fallbackKey) {
 			return { key: fallbackKey, source: 'fallback' };
 		}
-		// 如果模型在 fallback 列表但没有设置 fallback key，则继续尝试 Pool Key
 	}
-	const poolKey = await getNextPoolKey(); // Uses refactored getNextPoolKey which uses refactored getPoolKeys
+
+	// getNextPoolKey reads list from cache, uses atomic op
+	const poolKey = await getNextPoolKey();
 	if (poolKey) {
 		return { key: poolKey, source: 'pool' };
 	}

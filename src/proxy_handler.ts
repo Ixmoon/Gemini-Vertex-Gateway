@@ -168,12 +168,19 @@ const _tryGetFirstGcpToken = async (
 	}
 };
 
-/** [重构] 每次都从 KV 加载并解析 GCP 凭证 */
-export const loadGcpCreds = async (): Promise<{ creds: GcpCredentials[]; auths: GoogleAuth[] }> => {
-	// ... (保持不变) ...
+// 全局缓存 GCP 凭证和认证对象
+let cachedGcpCreds: GcpCredentials[] = [];
+let cachedGcpAuths: GoogleAuth[] = [];
+let gcpCredsLoaded = false;
+
+/** [重构] 从 KV 加载并缓存 GCP 凭证 */
+export const loadAndCacheGcpCreds = async (): Promise<{ creds: GcpCredentials[]; auths: GoogleAuth[] }> => {
 	const jsonStr = await getGcpCredentialsString();
 	if (!jsonStr) {
-		return { creds: [], auths: [] }; // 没有凭证字符串，返回空
+		cachedGcpCreds = [];
+		cachedGcpAuths = [];
+		gcpCredsLoaded = true;
+		return { creds: [], auths: [] };
 	}
 	try {
 		const creds = parseCreds(jsonStr);
@@ -181,19 +188,39 @@ export const loadGcpCreds = async (): Promise<{ creds: GcpCredentials[]; auths: 
 			credentials: cred,
 			scopes: ["https://www.googleapis.com/auth/cloud-platform"]
 		}));
+		cachedGcpCreds = creds;
+		cachedGcpAuths = auths;
+		gcpCredsLoaded = true;
 		return { creds, auths };
 	} catch (e) {
 		console.error("Failed to load/parse GCP creds:", e);
-		return { creds: [], auths: [] }; // 解析失败，返回空
+		cachedGcpCreds = [];
+		cachedGcpAuths = [];
+		gcpCredsLoaded = true; // 标记为已尝试加载，即使失败
+		return { creds: [], auths: [] };
 	}
 };
 
-// [重构] 使用原子计数器获取 GCP 认证信息 (优先读 KV 缓存, 1 分钟 TTL)
+/** 清除 GCP 凭证缓存，强制下次重新加载 */
+export const invalidateGcpCredsCache = () => {
+	gcpCredsLoaded = false;
+	cachedGcpCreds = [];
+	cachedGcpAuths = [];
+	console.log("GCP credentials cache invalidated.");
+};
+
+// [重构] 使用全局缓存和原子计数器获取 GCP 认证信息 (优先读 KV Token 缓存, 1 分钟 TTL)
 const getGcpAuth = async (): Promise<{ token: string; projectId: string } | null> => {
-	// 1. 加载最新的凭证
-	const { creds, auths } = await loadGcpCreds();
+	// 1. 确保凭证已加载到缓存
+	if (!gcpCredsLoaded) {
+		await loadAndCacheGcpCreds();
+	}
+	// 使用全局缓存的 creds 和 auths
+	const creds = cachedGcpCreds;
+	const auths = cachedGcpAuths;
+
 	if (!auths.length) {
-		console.warn("getGcpAuth called but no GCP credentials available.");
+		// console.warn("getGcpAuth called but no GCP credentials available in cache.");
 		return null; // 没有可用凭证
 	}
 
@@ -244,10 +271,10 @@ const getGcpAuth = async (): Promise<{ token: string; projectId: string } | null
 			console.error("Error during KV operation/index calculation in getGcpAuth:", error);
 		}
 
-		// 6. 执行回退逻辑 (使用加载的 creds 和 auths)
+		// 6. 执行回退逻辑 (使用缓存的 creds 和 auths)
 		console.warn("Falling back to first GCP credential (index 0).");
 		// 回退逻辑现在优先检查索引 0 的缓存
-		return await _tryGetFirstGcpToken(creds, auths);
+		return await _tryGetFirstGcpToken(creds, auths); // 传递缓存的凭证
 	}
 };
 
@@ -315,14 +342,7 @@ class VertexAIStrategy implements RequestHandlerStrategy {
 		// 获取全局重试限制
 		const apiRetryLimit = await getApiRetryLimit();
 
-		// [移除] 不再检查 credsLoaded 或手动调用 loadGcpCreds
-		// if (!credsLoaded) {
-		// 	await loadGcpCreds();
-		// }
-		// [移除] gcpAuth.length 检查移至 getGcpAuth 内部
-		// if (!gcpAuth.length) {
-		// 	throw new Response("未配置 GCP 凭证", { status: 503 });
-		// }
+		// getGcpAuth 内部会确保凭证已加载
 
 		// 直接调用重构后的 getGcpAuth (它内部会加载最新凭证)
 		const auth = await getGcpAuth();
@@ -732,6 +752,12 @@ const getStrategy = (type: RequestType): RequestHandlerStrategy => {
 
 // === 主处理函数  ===
 export const handleGenericProxy = async (c: Context): Promise<Response> => {
+	// 确保首次请求时加载 GCP 凭证 (如果尚未加载)
+	// 注意：这个检查现在移到了 getGcpAuth 内部，这里不需要重复检查
+	// if (!gcpCredsLoaded) {
+	// 	await loadAndCacheGcpCreds();
+	// }
+
 	const req = c.req.raw;
 	const url = new URL(req.url);
 
