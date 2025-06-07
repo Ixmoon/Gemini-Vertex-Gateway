@@ -131,29 +131,7 @@ export async function getConfigValue<T>(cacheKey: string, defaultValue: T): Prom
 						console.log(`[getConfigValue:${cacheKey}] Parsed cached data:`, data, `(Type: ${typeof data}, IsArray: ${Array.isArray(data)})`); // DEBUG LOG
 						console.log(`[getConfigValue:${cacheKey}] Default value:`, defaultValue, `(Type: ${typeof defaultValue}, IsArray: ${Array.isArray(defaultValue)})`); // DEBUG LOG
 
-						// Type checking logic
-						let typeMatch = false;
-						if (typeof data === typeof defaultValue || (data === null && defaultValue === null)) {
-							typeMatch = true;
-							console.log(`[getConfigValue:${cacheKey}] Type match: Basic type or both null.`); // DEBUG LOG
-							return data as T;
-						} else if (Array.isArray(defaultValue) && Array.isArray(data)) {
-							typeMatch = true;
-							console.log(`[getConfigValue:${cacheKey}] Type match: Both arrays.`); // DEBUG LOG
-							return data as T;
-						} else if (typeof defaultValue === 'object' && defaultValue !== null && !Array.isArray(defaultValue) &&
-								   typeof data === 'object' && data !== null && !Array.isArray(data)) {
-							typeMatch = true;
-							console.log(`[getConfigValue:${cacheKey}] Type match: Both non-array objects.`); // DEBUG LOG
-							return data as T;
-						} else {
-							console.warn(`[getConfigValue:${cacheKey}] Cache type mismatch. Expected ${typeof defaultValue}, got ${typeof data}. Falling back to KV fetch.`); // DEBUG LOG
-							console.warn(`Cache type mismatch for key "${cacheKey}". Expected ${typeof defaultValue}, got ${typeof data}. Falling back to default, will attempt KV fetch.`);
-							// 类型不匹配，继续尝试 KV
-						}
-						if (!typeMatch) { // Log if no match was found before falling through
-								console.log(`[getConfigValue:${cacheKey}] No type match found in cache check.`); // DEBUG LOG
-						}
+						return data as T; // 移除类型检查，直接返回解析结果
 					}
 				}
 			} catch (parseError) {
