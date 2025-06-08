@@ -39,10 +39,10 @@ let kv: Deno.Kv | null = null;
 /** [内部] 确保 KV 实例已初始化 (异步，懒加载) - Exported */
 export async function ensureKv(): Promise<Deno.Kv> {
 	if (!kv) {
-		console.log("KV connection not initialized. Opening lazily...");
+		//console.log("KV connection not initialized. Opening lazily...");
 		try {
 			kv = await Deno.openKv();
-			console.log("Lazy KV connection successful.");
+			//console.log("Lazy KV connection successful.");
 		} catch (error) {
 			console.error("Failed to open lazy KV connection:", error);
 			throw error; // Re-throw the error so the caller knows
@@ -81,7 +81,7 @@ export async function setAdminPassword(password: string): Promise<void> {
 	await (await kv).set(ADMIN_PASSWORD_HASH_KEY, newHash); // Corrected: await kv first
 	// 2. 更新 Edge Cache (Write-Through)
 	await setEdgeCacheValue(CACHE_KEYS.ADMIN_PASSWORD_HASH, newHash); // 移除 TTL
-	console.log("Admin password updated in KV and Edge Cache.");
+	//console.log("Admin password updated in KV and Edge Cache.");
 }
 
 /** [修正] 直接从 KV 获取管理员密码哈希 (用于管理界面) */
@@ -132,7 +132,7 @@ async function _setKvValue<T>(key: Deno.KvKey, value: T): Promise<void> {
 	// 2. 更新 Edge Cache (Write-Through)
 	const cacheKey = key.join('_');
 	await setEdgeCacheValue(cacheKey, value); // 移除 TTL
-	// console.log(`Set KV and updated Edge Cache for key: ${cacheKey}`);
+	// //console.log(`Set KV and updated Edge Cache for key: ${cacheKey}`);
 }
 
 /** [内部] 删除任意 KV 键 (删除 KV 并更新 Edge Cache 为默认值) */
@@ -144,7 +144,7 @@ async function _deleteKvKey(key: Deno.KvKey): Promise<void> {
 	const cacheKey = key.join('_');
 	// 删除 KV 后，将缓存值设为 null 来表示删除或不存在
 	await setEdgeCacheValue(cacheKey, null); // 移除 TTL
-	// console.log(`Deleted KV and set Edge Cache to null for key: ${cacheKey}`);
+	// //console.log(`Deleted KV and set Edge Cache to null for key: ${cacheKey}`);
 }
 
 /** [内部] 从 KV 获取字符串列表 (仅限内部需要直接读 KV 的场景) */
@@ -177,7 +177,7 @@ async function _addItemToSet(key: Deno.KvKey, item: string): Promise<boolean> {
 		// 3. 更新 Edge Cache (Write-Through)
 		const cacheKey = key.join('_');
 		await setEdgeCacheValue(cacheKey, currentList); // 移除 TTL
-		// console.log(`Added item to KV and updated Edge Cache for key: ${cacheKey}`);
+		// //console.log(`Added item to KV and updated Edge Cache for key: ${cacheKey}`);
 		return true; // Added
 	}
 	return false; // Already exists
@@ -202,7 +202,7 @@ async function _removeItemFromList(key: Deno.KvKey, item: string): Promise<boole
 		// 3. 更新 Edge Cache (Write-Through)
 		const cacheKey = key.join('_');
 		await setEdgeCacheValue(cacheKey, currentList); // 移除 TTL
-		// console.log(`Removed item from KV and updated Edge Cache for key: ${cacheKey}`);
+		// //console.log(`Removed item from KV and updated Edge Cache for key: ${cacheKey}`);
 		return true; // Removed
 	}
 	return false; // Not found
@@ -239,14 +239,14 @@ async function _addItemsToList(key: Deno.KvKey, itemsToAdd: string[], listName: 
 		// 3. 更新 Edge Cache (Write-Through)
 		const cacheKey = key.join('_');
 		await setEdgeCacheValue(cacheKey, currentList); // 移除 TTL
-		// console.log(`Added ${addedCount} items to KV and updated Edge Cache for key: ${cacheKey}`);
+		// //console.log(`Added ${addedCount} items to KV and updated Edge Cache for key: ${cacheKey}`);
 	}
 }
 
 /** [内部] 清空 KV 中的列表 (删除 KV 并更新 Edge Cache 为默认值) */
 async function _clearList(key: Deno.KvKey, listName: string): Promise<void> {
 	await _deleteKvKey(key); // _deleteKvKey 内部处理 KV 删除和缓存更新
-	console.log(`${listName} list cleared from KV and Edge Cache set to default.`);
+	//console.log(`${listName} list cleared from KV and Edge Cache set to default.`);
 }
 
 // --- 触发密钥管理 ---
@@ -567,7 +567,7 @@ export async function getApiKeyForRequest(
 	modelName: string | null
 ): Promise<ApiKeyResult | null> {
 	if (!userProvidedKey) {
-		// console.log("getApiKeyForRequest: No user provided key.");
+		// //console.log("getApiKeyForRequest: No user provided key.");
 		return null; // 没有提供 key，直接返回 null
 	}
 
@@ -575,7 +575,7 @@ export async function getApiKeyForRequest(
 	const isKeyTrigger = await isTriggerKey(userProvidedKey);
 
 	if (!isKeyTrigger) {
-		// console.log("getApiKeyForRequest: User key is not a trigger key.");
+		// //console.log("getApiKeyForRequest: User key is not a trigger key.");
 		return { key: userProvidedKey, source: 'user' }; // 不是触发密钥，直接使用用户提供的密钥
 	}
 
@@ -584,7 +584,7 @@ export async function getApiKeyForRequest(
 		// 从缓存读取 Fallback Key
 		const fallbackKey = await getFallbackKeyFromCache(); // 使用新增的缓存函数
 		if (fallbackKey) {
-			// console.log(`getApiKeyForRequest: Using fallback key for model "${modelName}".`);
+			// //console.log(`getApiKeyForRequest: Using fallback key for model "${modelName}".`);
 			return { key: fallbackKey, source: 'fallback' }; // 找到 Fallback Key，使用它
 		} else {
 			console.warn(`Fallback model "${modelName}" triggered, but no fallback key is set.`);
@@ -595,7 +595,7 @@ export async function getApiKeyForRequest(
 	// 不是 Fallback 模型或 Fallback Key 未设置，尝试从 Pool 获取 (已修改为优先读缓存 + 随机)
 	const poolKey = await getNextPoolKey();
 	if (poolKey) {
-		// console.log("getApiKeyForRequest: Using a pool key.");
+		// //console.log("getApiKeyForRequest: Using a pool key.");
 		return { key: poolKey, source: 'pool' }; // 找到 Pool Key，使用它
 	}
 

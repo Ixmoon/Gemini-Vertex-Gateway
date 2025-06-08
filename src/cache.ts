@@ -15,7 +15,7 @@ export async function getEdgeCache(): Promise<Cache> {
 	if (!edgeCache) {
 		try {
 			edgeCache = await caches.open(CACHE_NAME);
-			// console.log(`Edge Cache "${CACHE_NAME}" opened successfully.`); // 减少日志噪音
+			// //console.log(`Edge Cache "${CACHE_NAME}" opened successfully.`); // 减少日志噪音
 		} catch (error) {
 			console.error(`Failed to open Edge Cache "${CACHE_NAME}":`, error);
 			// 在无法打开缓存时抛出错误，以便调用者知道
@@ -74,7 +74,7 @@ export async function setEdgeCacheValue(cacheKey: string, value: any, ttlSeconds
 		const body = JSON.stringify(value === undefined ? null : value);
 		const response = new Response(body, { headers });
 		await cache.put(request, response);
-		// console.log(`Edge Cache: Set value for key "${cacheKey}"`);
+		// //console.log(`Edge Cache: Set value for key "${cacheKey}"`);
 	} catch (error) {
 		console.error(`Error setting Edge Cache for key "${cacheKey}":`, error);
 	}
@@ -101,7 +101,7 @@ export async function getConfigValue<T>(cacheKey: string): Promise<T | null> {
 				const text = await cachedResponse.text();
 				try {
 					const data = JSON.parse(text || 'null'); // 空字符串解析为 null
-					// console.log(`[getConfigValue:${cacheKey}] Cache Hit. Returning cached data.`);
+					// //console.log(`[getConfigValue:${cacheKey}] Cache Hit. Returning cached data.`);
 					// 缓存命中且有效，直接返回
 					return data as T | null;
 				} catch (parseError) {
@@ -113,7 +113,7 @@ export async function getConfigValue<T>(cacheKey: string): Promise<T | null> {
 				// 非 JSON 视为缓存无效，继续执行 KV 回退
 			}
 		} else {
-			// console.log(`[getConfigValue:${cacheKey}] Cache Miss. Falling back to KV.`);
+			// //console.log(`[getConfigValue:${cacheKey}] Cache Miss. Falling back to KV.`);
 			// 缓存未命中，继续执行 KV 回退
 		}
 	} catch (cacheError) {
@@ -122,7 +122,7 @@ export async function getConfigValue<T>(cacheKey: string): Promise<T | null> {
 	}
 
 	// 2. 回退到从 Deno KV 读取
-	console.log(`[getConfigValue:${cacheKey}] Attempting KV fallback...`);
+	//console.log(`[getConfigValue:${cacheKey}] Attempting KV fallback...`);
 	try {
 		// 将 cacheKey (e.g., "trigger_keys") 转换回 Deno.KvKey (e.g., ["trigger_keys"])
 		const kvKey: Deno.KvKey = cacheKey.split('_');
@@ -135,7 +135,7 @@ export async function getConfigValue<T>(cacheKey: string): Promise<T | null> {
 			return null;
 		} else {
 			// KV 中找到了键，其值可能是 T 或 null
-			console.log(`[getConfigValue:${cacheKey}] KV Fallback successful. Updating cache and returning KV value (which might be null).`);
+			//console.log(`[getConfigValue:${cacheKey}] KV Fallback successful. Updating cache and returning KV value (which might be null).`);
 			// 将从 KV 读取到的值 (T 或 null) 写回缓存
 			setEdgeCacheValue(cacheKey, kvResult).catch(err => { // kvResult 可能是 null
 				console.error(`[getConfigValue:${cacheKey}] Error updating cache after KV fallback:`, err);
@@ -154,7 +154,7 @@ export async function getConfigValue<T>(cacheKey: string): Promise<T | null> {
 	* [核心] 并行加载所有指定的 KV 配置到 Edge Cache
 	*/
 export async function loadAndCacheAllKvConfigs(): Promise<void> {
-	console.log("Starting KV config preloading to Edge Cache...");
+	//console.log("Starting KV config preloading to Edge Cache...");
 	let kv: Deno.Kv;
 	try {
 		kv = await ensureKv(); // Use await: 确保 KV 已打开
@@ -166,7 +166,7 @@ export async function loadAndCacheAllKvConfigs(): Promise<void> {
 	try {
 		// 1. 从 KV 并行获取所有需要预加载的值
 		const results = await kv.getMany<any>(PRELOAD_KV_KEYS);
-		console.log(`KV getMany returned ${results.length} entries for preloading.`);
+		//console.log(`KV getMany returned ${results.length} entries for preloading.`);
 
 		const cachePromises: Promise<void>[] = [];
 
@@ -185,7 +185,7 @@ export async function loadAndCacheAllKvConfigs(): Promise<void> {
 
 		// 3. 等待所有缓存写入完成
 		await Promise.all(cachePromises);
-		console.log("KV config preloading to Edge Cache finished successfully.");
+		//console.log("KV config preloading to Edge Cache finished successfully.");
 
 	} catch (error) {
 		console.error("Error during KV config preloading process:", error);
@@ -201,7 +201,7 @@ export async function loadAndCacheAllKvConfigs(): Promise<void> {
 	*/
 export async function reloadKvConfig(kvKey: Deno.KvKey): Promise<void> {
 	const cacheKey = kvKey.join('_');
-	console.log(`Reloading KV config to Edge Cache for key: ${cacheKey}`);
+	//console.log(`Reloading KV config to Edge Cache for key: ${cacheKey}`);
 	let kv: Deno.Kv;
 	try {
 		kv = await ensureKv(); // Use await
@@ -219,11 +219,11 @@ export async function reloadKvConfig(kvKey: Deno.KvKey): Promise<void> {
 
 		// 2. 将新值写入 Edge Cache (覆盖旧值, 默认永不过期)
 		await setEdgeCacheValue(cacheKey, value);
-		console.log(`Successfully reloaded and cached "${cacheKey}" to Edge Cache.`);
+		//console.log(`Successfully reloaded and cached "${cacheKey}" to Edge Cache.`);
 
 		// GCP 凭证字符串更新的特殊处理 (保持不变，仅日志)
 		if (cacheKey === CACHE_KEYS.GCP_CREDENTIALS_STRING) {
-			console.log("GCP credentials string reloaded in Edge Cache. Auth instances will be recreated on demand.");
+			//console.log("GCP credentials string reloaded in Edge Cache. Auth instances will be recreated on demand.");
 		}
 	} catch (error) {
 		console.error(`Error reloading KV config to Edge Cache for "${cacheKey}":`, error);
@@ -239,7 +239,7 @@ export async function getParsedGcpCredentials(): Promise<GcpCredentials[]> {
 	const jsonStr = await getConfigValue<string>(CACHE_KEYS.GCP_CREDENTIALS_STRING); // 不再需要默认值
 
 	if (!jsonStr) {
-		console.log("No GCP credentials string found in Cache or KV.");
+		//console.log("No GCP credentials string found in Cache or KV.");
 		return []; // 缓存中没有或读取失败，返回空数组
 	}
 
@@ -250,7 +250,7 @@ export async function getParsedGcpCredentials(): Promise<GcpCredentials[]> {
 			console.warn("Parsed GCP credentials string from Edge Cache resulted in zero valid credentials.");
 			return []; // 解析结果为空或无效，返回空数组
 		}
-		// console.log(`Successfully parsed ${creds.length} GCP credentials from Edge Cache string.`);
+		// //console.log(`Successfully parsed ${creds.length} GCP credentials from Edge Cache string.`);
 		return creds; // 返回解析后的凭证数组
 	} catch (e) {
 		console.error("Failed to parse GCP credentials string from Edge Cache:", e);

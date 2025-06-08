@@ -10,13 +10,12 @@ import { handleGenericProxy } from "./proxy_handler.ts";
 // --- 导入缓存加载函数 ---
 import { loadAndCacheAllKvConfigs } from "./cache.ts";
 
-// --- 冷启动后1分钟刷新缓存 ---
-console.log("[Startup] Scheduling initial cache refresh in 1 minute...");
+// --- 冷启动刷新缓存 ---
 setTimeout(async () => {
-	console.log("[Timeout] Starting initial Edge Cache refresh...");
+	//console.log("[Timeout] Starting initial Edge Cache refresh...");
 	try {
 		await loadAndCacheAllKvConfigs();
-		console.log("[Timeout] Initial Edge Cache refresh finished successfully.");
+		//console.log("[Timeout] Initial Edge Cache refresh finished successfully.");
 	} catch (error) {
 		console.error("[Timeout] Initial Edge Cache refresh failed:", error);
 	}
@@ -116,19 +115,8 @@ app.onError((err, c) => {
 
 // --- 服务器启动 ---
 
-// 确定端口 (保持不变)
-let port = 8080;
-const portFromEnv = Deno.env.get("PORT");
-if (portFromEnv) {
-	try {
-		const parsedPort = parseInt(portFromEnv!, 10);
-		if (!isNaN(parsedPort) && parsedPort > 0 && parsedPort < 65536) {
-			port = parsedPort;
-		}
-	} catch (e) { /* Ignore parse error */ }
-}
 // KV 连接将通过 ensureKv() 在首次需要时懒加载避免阻塞冷启动
 
-// 启动服务器 (保持不变)
-Deno.serve({ port }, app.fetch);
-console.log(`Server running on http://localhost:${port}`);
+// 启动服务器 (端口将由 Deno Deploy 等环境自动设置)
+Deno.serve(app.fetch);
+//console.log(`Server running on default port`);

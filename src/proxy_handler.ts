@@ -116,10 +116,10 @@ const getGcpAuth = async (): Promise<{ token: string; projectId: string } | null
 				try {
 					const data = JSON.parse(text || 'null'); // data is the token string or null
 					if (typeof data === 'string' && data.length > 0) {
-						// console.log(`[getGcpAuth] Cache Hit for token: ${tokenCacheKey}`);
+						// //console.log(`[getGcpAuth] Cache Hit for token: ${tokenCacheKey}`);
 						return { token: data, projectId };
 					} else {
-						// console.log(`[getGcpAuth] Cache Hit but invalid token data for ${tokenCacheKey}.`);
+						// //console.log(`[getGcpAuth] Cache Hit but invalid token data for ${tokenCacheKey}.`);
 					}
 				} catch (parseError) {
 					console.warn(`[getGcpAuth] Cache Hit but failed to parse JSON for ${tokenCacheKey}: ${parseError}.`);
@@ -128,7 +128,7 @@ const getGcpAuth = async (): Promise<{ token: string; projectId: string } | null
 				console.warn(`[getGcpAuth] Cache Hit but invalid Content-Type for ${tokenCacheKey}: ${contentType}.`);
 			}
 		} else {
-			// console.log(`[getGcpAuth] Cache Miss for token: ${tokenCacheKey}. Fetching new token...`);
+			// //console.log(`[getGcpAuth] Cache Miss for token: ${tokenCacheKey}. Fetching new token...`);
 		}
 	} catch (cacheError) {
 		console.error(`[getGcpAuth] Error directly accessing Edge Cache for token ${tokenCacheKey}:`, cacheError);
@@ -154,7 +154,7 @@ const getGcpAuth = async (): Promise<{ token: string; projectId: string } | null
 		setEdgeCacheValue(tokenCacheKey, newToken, tokenTtlSeconds).catch(cacheSetError => {
 			console.error(`[getGcpAuth] Error setting token to cache for ${tokenCacheKey}:`, cacheSetError);
 		});
-		// console.log(`[getGcpAuth] Fetched and cached new token for ${tokenCacheKey}`);
+		// //console.log(`[getGcpAuth] Fetched and cached new token for ${tokenCacheKey}`);
 
 		// 8. 返回新 Token 和 Project ID
 		return { token: newToken, projectId };
@@ -617,11 +617,11 @@ const determineRequestType = async (
 	const path = prefix ? pathname.slice(prefix.length) : pathname; // 移除前缀得到相对路径
 
 	if (!prefix) {
-		// console.log(`determineRequestType: No matching prefix found for path "${pathname}"`);
+		// //console.log(`determineRequestType: No matching prefix found for path "${pathname}"`);
 		return { type: RequestType.UNKNOWN, prefix: null, path };
 	}
 
-	// console.log(`determineRequestType: Matched prefix "${prefix}", path is "${path}"`);
+	// //console.log(`determineRequestType: Matched prefix "${prefix}", path is "${path}"`);
 
 	const isGeminiPrefix = prefix === '/gemini';
 	// OpenAI 兼容路径通常不包含 /v1beta/
@@ -643,12 +643,12 @@ const determineRequestType = async (
 				parsedBody = null; // 标记解析失败
 			}
 		} else {
-			// console.log("determineRequestType: No body or not applicable method for model check.");
+			// //console.log("determineRequestType: No body or not applicable method for model check.");
 		}
 
 		// 使用 await 调用 isVertexModel (从缓存读取)
 		const isVertex = await isVertexModel(model); // await
-		// console.log(`determineRequestType: isVertexModel check result: ${isVertex}`);
+		// //console.log(`determineRequestType: isVertexModel check result: ${isVertex}`);
 		return {
 			type: isVertex ? RequestType.VERTEX_AI : RequestType.GEMINI_OPENAI,
 			prefix,
@@ -657,7 +657,7 @@ const determineRequestType = async (
 		};
 	} else if (isGeminiPrefix) {
 		// 如果是 /gemini 前缀但不是 OpenAI 兼容路径，则认为是原生 Gemini
-		// console.log("determineRequestType: Identified as Gemini Native.");
+		// //console.log("determineRequestType: Identified as Gemini Native.");
 		return { type: RequestType.GEMINI_NATIVE, prefix, path };
 	} else {
 		// 其他所有匹配的前缀都按通用代理处理
@@ -748,7 +748,7 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 			const targetBody = await strategy.processRequestBody(strategyContext); // await
 
 			// e. 发送代理请求
-			// console.log(`Attempt ${attempts}/${maxRetries}: Proxying to ${targetUrl.toString()} for ${RequestType[type]}`);
+			// //console.log(`Attempt ${attempts}/${maxRetries}: Proxying to ${targetUrl.toString()} for ${RequestType[type]}`);
 			const proxyResponse = await fetch(targetUrl.toString(), { // 使用 toString() 获取完整 URL
 				method: req.method,
 				headers: targetHeaders,
@@ -765,7 +765,7 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 				if (strategy.handleResponse) {
 					finalResponse = await strategy.handleResponse(proxyResponse, strategyContext); // await
 				}
-				// console.log(`Attempt ${attempts}/${maxRetries}: Success for ${RequestType[type]} ${targetUrl}`);
+				// //console.log(`Attempt ${attempts}/${maxRetries}: Success for ${RequestType[type]} ${targetUrl}`);
 				return finalResponse; // 返回成功响应
 			} else {
 				// 失败响应
