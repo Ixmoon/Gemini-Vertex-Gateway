@@ -25,7 +25,6 @@ export interface GcpCredentials {
 export const ADMIN_PASSWORD_HASH_KEY = ["admin_password_hash"];
 export const TRIGGER_KEYS_KEY = ["trigger_keys"];
 export const POOL_KEYS_KEY = ["pool_keys"];
-// export const GCP_CREDENTIAL_ATOMIC_INDEX_KEY = ["gcp_credential_atomic_index"]; // Removed
 export const FALLBACK_KEY_KEY = ["fallback_key"];
 export const GCP_CREDENTIALS_STRING_KEY = ["gcp_credentials_string"];
 export const GCP_DEFAULT_LOCATION_KEY = ["gcp_default_location"];
@@ -66,8 +65,6 @@ async function verifyPassword(password: string, storedHash: string): Promise<boo
 		return false;
 	}
 	const inputHash = await hashPassword(password);
-	// 使用 crypto.subtle.timingSafeEqual 进行更安全的比较（虽然理论上 SHA256 不易受时序攻击）
-	// 但需要将 hex string 转回 ArrayBuffer，这里简单比较字符串
 	return inputHash === storedHash;
 }
 

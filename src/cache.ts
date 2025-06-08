@@ -11,7 +11,7 @@ const CACHE_NAME = "llm-gateway-cache";
 let edgeCache: Cache | null = null;
 
 // 获取 Edge Cache 实例 (惰性初始化)
-async function getEdgeCache(): Promise<Cache> {
+export async function getEdgeCache(): Promise<Cache> {
 	if (!edgeCache) {
 		try {
 			edgeCache = await caches.open(CACHE_NAME);
@@ -232,7 +232,6 @@ export async function reloadKvConfig(kvKey: Deno.KvKey): Promise<void> {
 
 /**
 	* [核心] 读取并解析 GCP 凭证字符串 (从 Edge Cache)
-	* 不再缓存 Auth 实例。由 proxy_handler 按需创建。
 	* @returns 解析后的 GcpCredentials 数组，如果缓存中没有或解析失败则返回空数组。
 	*/
 export async function getParsedGcpCredentials(): Promise<GcpCredentials[]> {

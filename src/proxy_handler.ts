@@ -10,7 +10,6 @@ import {
 	isVertexModel,	   // 已改为 async
 	ApiKeySource,		// 类型定义
 	ApiKeyResult,		// 类型定义
-	GcpCredentials,	  // 类型定义
 	getApiRetryLimitFromCache, // [新增] 从缓存读取重试次数
 	getGcpDefaultLocationFromCache, // [新增] 从缓存读取 GCP 位置
 	isValidCred, // Import from replacekeys
@@ -20,6 +19,7 @@ import {
 	getConfigValue,
 	getParsedGcpCredentials,
 	setEdgeCacheValue, // [新增] 导入设置缓存的函数
+	getEdgeCache, // [新增] 导入获取 Edge Cache 实例的函数
 	CACHE_KEYS
 } from "./cache.ts";
 
@@ -103,16 +103,35 @@ const getGcpAuth = async (): Promise<{ token: string; projectId: string } | null
 	const tokenCacheKey = `${CACHE_KEYS.GCP_AUTH_TOKEN_PREFIX}${selectedCred.client_email}`;
 	const projectId = selectedCred.project_id; // 提前获取 Project ID
 
-	// 5. 尝试从 Edge Cache 获取 Token
+	// 5. 尝试从 Edge Cache 直接获取 Token (避免 KV 回退)
 	try {
-		const cachedToken = await getConfigValue<string>(tokenCacheKey);
-		if (cachedToken) {
-			// console.log(`[getGcpAuth] Cache Hit for token: ${tokenCacheKey}`);
-			return { token: cachedToken, projectId };
+		const cache = await getEdgeCache();
+		const cacheRequest = new Request(`http://cache.internal/${encodeURIComponent(tokenCacheKey)}`);
+		const cachedResponse = await cache.match(cacheRequest);
+
+		if (cachedResponse) {
+			const contentType = cachedResponse.headers.get('content-type');
+			if (contentType && contentType.includes('application/json')) {
+				const text = await cachedResponse.text();
+				try {
+					const data = JSON.parse(text || 'null'); // data is the token string or null
+					if (typeof data === 'string' && data.length > 0) {
+						// console.log(`[getGcpAuth] Cache Hit for token: ${tokenCacheKey}`);
+						return { token: data, projectId };
+					} else {
+						// console.log(`[getGcpAuth] Cache Hit but invalid token data for ${tokenCacheKey}.`);
+					}
+				} catch (parseError) {
+					console.warn(`[getGcpAuth] Cache Hit but failed to parse JSON for ${tokenCacheKey}: ${parseError}.`);
+				}
+			} else {
+				console.warn(`[getGcpAuth] Cache Hit but invalid Content-Type for ${tokenCacheKey}: ${contentType}.`);
+			}
+		} else {
+			// console.log(`[getGcpAuth] Cache Miss for token: ${tokenCacheKey}. Fetching new token...`);
 		}
-		// console.log(`[getGcpAuth] Cache Miss for token: ${tokenCacheKey}. Fetching new token...`);
 	} catch (cacheError) {
-		console.error(`[getGcpAuth] Error reading token from cache for ${tokenCacheKey}:`, cacheError);
+		console.error(`[getGcpAuth] Error directly accessing Edge Cache for token ${tokenCacheKey}:`, cacheError);
 		// 缓存读取失败，继续尝试获取新 Token
 	}
 
@@ -618,7 +637,6 @@ const determineRequestType = async (
 				const bodyText = new TextDecoder().decode(originalBodyBuffer);
 				parsedBody = JSON.parse(bodyText);
 				model = parsedBody?.model ?? null;
-				// console.log(`determineRequestType: Parsed body for model check, model="${model}"`);
 			} catch (e) {
 				console.warn("determineRequestType: Failed to parse body for model check:", e);
 				// 解析失败，无法判断是否 Vertex，按 OpenAI 处理
@@ -643,7 +661,6 @@ const determineRequestType = async (
 		return { type: RequestType.GEMINI_NATIVE, prefix, path };
 	} else {
 		// 其他所有匹配的前缀都按通用代理处理
-		// console.log("determineRequestType: Identified as Generic Proxy.");
 		return { type: RequestType.GENERIC_PROXY, prefix, path };
 	}
 };
