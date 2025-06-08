@@ -130,25 +130,20 @@ if (portFromEnv) {
 }
 
 // --- 确保 KV 在启动时打开 ---
-console.log("Ensuring KV store is open for startup operations...");
-try {
-await kvOps.openKv(); // <--- 重新添加显式打开 KV
-console.log("KV opened successfully.");
-} catch (kvError) {
-console.error("FATAL: Failed to open KV store during startup:", kvError);
-// 也许应该在这里退出？取决于需求
-throw new Error("Failed to initialize KV store."); // 抛出错误阻止启动
-}
-
 // --- [移除] 移除所有启动时预加载缓存的逻辑 ---
 // 缓存将在第一个请求处理完成后通过 waitUntil 在后台填充
 
-// 启动服务器 (保持不变)
 // --- Queue Listener ---
+// [修改] 改为异步函数，并在内部确保 KV 连接
 async function startQueueListener() {
+	console.log("Starting Deno KV Queue listener initialization...");
 	try {
-		const kv = await ensureKv(); // 获取 KV 实例
+		// [修改] 在监听前确保 KV 连接
+		const kv = await ensureKv();
+		console.log("KV connection ensured for queue listener.");
+
 		console.log("Starting Deno KV Queue listener for 'refreshCache' tasks...");
+		// [保持] 继续监听队列
 		kv.listenQueue(async (msg: unknown) => {
 			// 基本类型检查
 			if (typeof msg === 'object' && msg !== null && 'type' in msg && msg.type === 'refreshCache') {
@@ -173,8 +168,17 @@ async function startQueueListener() {
 	}
 }
 
-// 在服务器启动前启动队列监听器
-startQueueListener();
+// [修改] 异步启动队列监听器，不阻塞服务器启动
+startQueueListener(); // <--- 移除 await，让其在后台启动
 
-Deno.serve({ port }, app.fetch);
-console.log(`Server running on http://localhost:${port}`);
+// 立即尝试启动服务器
+try {
+	Deno.serve({ port }, app.fetch);
+	console.log(`Server running on http://localhost:${port}`);
+} catch (error) {
+	// 这个 catch 主要捕获 Deno.serve 本身的错误，而不是 startQueueListener 的错误
+	console.error("FATAL: Failed to start Deno server:", error);
+		// Consider exiting if the queue listener is critical and failed to start
+		// Deno.exit(1);
+	}
+// Removed leftover IIFE closing
