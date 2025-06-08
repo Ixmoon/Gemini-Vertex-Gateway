@@ -6,8 +6,9 @@ import { serveStatic } from "hono/middleware";
 import * as kvOps from "./replacekeys.ts"; // Keep existing kvOps import for other functions
 // --- 导入新的代理处理模块 ---
 import { handleGenericProxy } from "./proxy_handler.ts";
-// --- 导入缓存加载函数 ---
-import { loadAndCacheAllKvConfigs } from "./cache.ts"; // <--- 导入函数
+// --- 导入缓存和队列相关 ---
+import { loadAndCacheAllKvConfigs } from "./cache.ts";
+import { ensureKv } from "./replacekeys.ts"; // [新增] 导入 ensureKv 用于队列
 
 // --- 辅助函数 (非代理相关) (保持不变) ---
 /** 创建 JSON 错误响应 */
@@ -143,5 +144,37 @@ throw new Error("Failed to initialize KV store."); // 抛出错误阻止启动
 // 缓存将在第一个请求处理完成后通过 waitUntil 在后台填充
 
 // 启动服务器 (保持不变)
+// --- Queue Listener ---
+async function startQueueListener() {
+	try {
+		const kv = await ensureKv(); // 获取 KV 实例
+		console.log("Starting Deno KV Queue listener for 'refreshCache' tasks...");
+		kv.listenQueue(async (msg: unknown) => {
+			// 基本类型检查
+			if (typeof msg === 'object' && msg !== null && 'type' in msg && msg.type === 'refreshCache') {
+				console.log("[Queue] Received 'refreshCache' task. Processing...");
+				try {
+					await loadAndCacheAllKvConfigs();
+					console.log("[Queue] Background cache refresh task completed successfully.");
+				} catch (error) {
+					console.error("[Queue] Error executing background cache refresh task:", error);
+					// Deno Queues 应该会自动重试失败的消息
+				}
+			} else {
+				console.warn("[Queue] Received unknown message:", msg);
+				// 可以考虑将未知消息移到死信队列或其他处理
+			}
+		});
+		console.log("Deno KV Queue listener started.");
+	} catch (error) {
+		console.error("FATAL: Failed to start Deno KV Queue listener:", error);
+		// 如果监听器启动失败，可能需要阻止服务器启动
+		throw new Error("Failed to start KV Queue listener.");
+	}
+}
+
+// 在服务器启动前启动队列监听器
+startQueueListener();
+
 Deno.serve({ port }, app.fetch);
 console.log(`Server running on http://localhost:${port}`);

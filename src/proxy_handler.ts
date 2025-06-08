@@ -15,6 +15,7 @@ import {
 	getApiRetryLimit,    // 已改为 async
 	getGcpDefaultLocation, // 已改为 async
 	getApiMappings,      // 已改为 async
+	ensureKv,            // [新增] 导入 ensureKv 用于队列
 } from "./replacekeys.ts";
 // 导入 Edge Cache 相关函数
 import { getParsedGcpCredentials, loadAndCacheAllKvConfigs } from "./cache.ts"; // [新增] 导入 loadAndCacheAllKvConfigs
@@ -660,22 +661,7 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 		} catch (e) {
 			console.error("Failed to read original request body into ArrayBuffer:", e);
 			const errorResponse = new Response("Internal Server Error: Failed to process request body.", { status: 500 });
-			// [修改] 使用 try-catch 处理后台缓存同步
-			try {
-				c.executionCtx?.waitUntil( // Optional chaining for safety, though error seems to be in getter
-					(async () => {
-						console.log("[waitUntil] Triggering background cache refresh after body read error.");
-						try {
-							await loadAndCacheAllKvConfigs();
-						} catch (cacheError) {
-							console.error("[waitUntil] Background cache refresh failed (body read error):", cacheError);
-						}
-					})()
-				);
-			} catch (e) {
-				console.error("[waitUntil] Error accessing/using executionCtx (body read error):", e);
-			}
-			return errorResponse;
+			return errorResponse; // 不在这里触发队列
 		}
 	}
 
@@ -686,44 +672,14 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 	} catch (error) {
 		console.error("Error during request type determination:", error);
 		const errorResponse = new Response("Internal Server Error during request routing.", { status: 500 });
-		// [修改] 使用 try-catch 处理后台缓存同步
-		try {
-			c.executionCtx?.waitUntil( // Optional chaining
-				(async () => {
-					console.log("[waitUntil] Triggering background cache refresh after type determination error.");
-					try {
-						await loadAndCacheAllKvConfigs();
-					} catch (cacheError) {
-						console.error("[waitUntil] Background cache refresh failed (type determination error):", cacheError);
-					}
-				})()
-			);
-		} catch (e) {
-			console.error("[waitUntil] Error accessing/using executionCtx (type determination error):", e);
-		}
-		return errorResponse;
+		return errorResponse; // 不在这里触发队列
 	}
 
 	const { type, prefix, path, parsedBody } = determinationResult;
 
 	if (type === RequestType.UNKNOWN) {
 		const errorResponse = new Response(`No proxy route configured for path: ${url.pathname}`, { status: 404 });
-		// [修改] 使用 try-catch 处理后台缓存同步 (即使是 404，也可能是配置更新导致，同步一下)
-		try {
-			c.executionCtx?.waitUntil( // Optional chaining
-				(async () => {
-					console.log(`[waitUntil] Triggering background cache refresh after UNKNOWN request type for path: ${url.pathname}.`);
-					try {
-						await loadAndCacheAllKvConfigs();
-					} catch (cacheError) {
-						console.error(`[waitUntil] Background cache refresh failed (UNKNOWN request type for path ${url.pathname}):`, cacheError);
-					}
-				})()
-			);
-		} catch (e) {
-			console.error("[waitUntil] Error accessing/using executionCtx (UNKNOWN request type):", e);
-		}
-		return errorResponse;
+		return errorResponse; // 不在这里触发队列
 	}
 
 	const strategy = getStrategy(type);
@@ -781,22 +737,16 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 					finalResponse = await strategy.handleResponse(proxyResponse, strategyContext); // await
 				}
 				// console.log(`Attempt ${attempts}/${maxRetries}: Success for ${RequestType[type]} ${targetUrl}`);
-				// [修改] 使用 try-catch 处理后台缓存同步
+				// [新增] 成功响应后触发后台缓存刷新队列
 				try {
-					c.executionCtx?.waitUntil( // Optional chaining
-						(async () => {
-							console.log(`[waitUntil] Triggering background cache refresh after successful proxy request for ${RequestType[type]} ${url.pathname}.`);
-							try {
-								await loadAndCacheAllKvConfigs();
-							} catch (cacheError) {
-								console.error(`[waitUntil] Background cache refresh failed (successful request for ${RequestType[type]} ${url.pathname}):`, cacheError);
-							}
-						})()
-					);
-				} catch (e) {
-					console.error("[waitUntil] Error accessing/using executionCtx (successful request):", e);
+					const kv = await ensureKv();
+					await kv.enqueue({ type: "refreshCache" });
+					console.log(`[Queue] Enqueued background cache refresh task after successful proxy for ${RequestType[type]} ${url.pathname}.`);
+				} catch (enqueueError) {
+					console.error("[Queue] Failed to enqueue background cache refresh task:", enqueueError);
 				}
-				return finalResponse; // 返回成功响应
+
+				return finalResponse; // <<< 返回成功响应
 			} else {
 				// 失败响应
 				console.warn(`Attempt ${attempts}/${maxRetries} failed for ${RequestType[type]} ${targetUrl}: ${proxyResponse.status} ${proxyResponse.statusText}`);
@@ -825,22 +775,7 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 				// 记录详细错误并返回 500
 				console.error("Non-Response error details:", error instanceof Error ? error.stack : error);
 				// 即使发生内部错误，也尝试返回上次捕获的 HTTP 错误（如果有的话），否则返回通用 500
-				const errorResponse = lastErrorResponse ?? new Response(`Internal Server Error during request processing: ${error instanceof Error ? error.message : String(error)}`, { status: 500 });
-				// [修改] 使用 try-catch 处理后台缓存同步
-				try {
-					c.executionCtx?.waitUntil( // Optional chaining
-						(async () => {
-							console.log(`[waitUntil] Triggering background cache refresh after non-Response error during attempt ${attempts}/${maxRetries} for ${RequestType[type]}.`);
-							try {
-								await loadAndCacheAllKvConfigs();
-							} catch (cacheError) {
-								console.error(`[waitUntil] Background cache refresh failed (non-Response error for ${RequestType[type]}):`, cacheError);
-							}
-						})()
-					);
-				} catch (e) {
-					console.error("[waitUntil] Error accessing/using executionCtx (non-Response error):", e);
-				}
+				const errorResponse = lastErrorResponse ?? new Response(`Internal Server Error during request processing: ${error instanceof Error ? error.message : String(error)}`, { status: 500 }); // 不在这里触发队列
 				return errorResponse;
 			}
 		}
@@ -848,40 +783,12 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 
 	// 5. 如果循环结束仍未成功，返回最后一次捕获的错误响应
 	if (lastErrorResponse) {
-		// [修改] 使用 try-catch 处理后台缓存同步
-		try {
-			c.executionCtx?.waitUntil( // Optional chaining
-				(async () => {
-					console.log(`[waitUntil] Triggering background cache refresh after max retries reached, returning last HTTP error for ${RequestType[type]} ${url.pathname}.`);
-					try {
-						await loadAndCacheAllKvConfigs();
-					} catch (cacheError) {
-						console.error(`[waitUntil] Background cache refresh failed (max retries reached for ${RequestType[type]} ${url.pathname}):`, cacheError);
-					}
-				})()
-			);
-		} catch (e) {
-			console.error("[waitUntil] Error accessing/using executionCtx (max retries reached, last HTTP error):", e);
-		}
+		// 不在这里触发队列，因为请求本身失败了
 		return lastErrorResponse;
 	}
 
 	// 如果循环因某种原因结束且没有 lastErrorResponse（理论上不应发生），返回通用错误
 	const finalErrorResponse = new Response("Request processing failed after maximum retries.", { status: 502 }); // 502 Bad Gateway 可能更合适
-	// [修改] 使用 try-catch 处理后台缓存同步
-	try {
-		c.executionCtx?.waitUntil( // Optional chaining
-			(async () => {
-				console.log(`[waitUntil] Triggering background cache refresh after max retries reached with no specific last error for ${RequestType[type]} ${url.pathname}.`);
-				try {
-					await loadAndCacheAllKvConfigs();
-				} catch (cacheError) {
-					console.error(`[waitUntil] Background cache refresh failed (max retries, no specific error for ${RequestType[type]} ${url.pathname}):`, cacheError);
-				}
-			})()
-		);
-	} catch (e) {
-		console.error("[waitUntil] Error accessing/using executionCtx (max retries reached, no specific error):", e);
-	}
+	// 不在这里触发队列，因为请求本身失败了
 	return finalErrorResponse;
 };
