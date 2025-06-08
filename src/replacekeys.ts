@@ -1,5 +1,5 @@
 // --- 导入缓存模块 ---
-import { CACHE_KEYS, getConfigValue, setEdgeCacheValue, DEFAULT_VALUES } from "./cache.ts";
+import { CACHE_KEYS, getConfigValue, setEdgeCacheValue } from "./cache.ts"; // 移除 DEFAULT_VALUES 导入
 
 // 定义用于 Write-Through 的默认 TTL (秒)
 const WRITE_THROUGH_TTL_SECONDS = 5 * 60; // 5 minutes
@@ -103,14 +103,15 @@ export async function setAdminPassword(password: string): Promise<void> {
 	console.log("Admin password updated in KV and Edge Cache.");
 }
 
-/** [重构] 从 Edge Cache 获取管理员密码哈希 */
+/** [修改] 直接从 KV 获取管理员密码哈希 (用于管理和登录) */
 export async function getAdminPasswordHash(): Promise<string | null> {
-	return await getConfigValue<string | null>(CACHE_KEYS.ADMIN_PASSWORD_HASH, DEFAULT_VALUES[CACHE_KEYS.ADMIN_PASSWORD_HASH]);
+	const result = await getKvValueDirectly<string>(ADMIN_PASSWORD_HASH_KEY);
+	return result === KV_NOT_FOUND ? null : result; // 如果未找到，返回 null
 }
 
-/** [重构] 验证管理员密码 (从 Edge Cache 读取哈希) */
+/** [重构] 验证管理员密码 (直接从 KV 读取哈希) */
 export async function verifyAdminPassword(password: string): Promise<boolean> {
-	const storedHash = await getAdminPasswordHash(); // await 读取 Edge Cache
+	const storedHash = await getAdminPasswordHash(); // await 直接读取 KV
 	if (!storedHash) {
 		return false; // 哈希不存在，无法验证
 	}
@@ -120,11 +121,29 @@ export async function verifyAdminPassword(password: string): Promise<boolean> {
 
 // --- 内部通用 KV 助手函数 (用于 Write-Through 和需要直接读 KV 的场景) ---
 
-/** [内部] 获取任意类型的单个 KV 值 (仅限内部使用) */
-async function _getKvValue<T>(key: Deno.KvKey): Promise<T | null> {
+/** [导出] 用于表示 KV 中未找到键的特殊 Symbol */
+export const KV_NOT_FOUND = Symbol("KV_NOT_FOUND");
+
+/**
+ * [导出] [内部] 获取任意类型的单个 KV 值 (供 cache.ts 回退使用)
+ * 能够区分 KV 中的 null 值和键未找到的情况。
+ * @param key Deno.KvKey
+ * @returns Promise<T | null | typeof KV_NOT_FOUND>
+ *          - T: 找到非 null 值
+ *          - null: 找到且值为 null
+ *          - KV_NOT_FOUND: 键未找到
+ */
+export async function getKvValueDirectly<T>(key: Deno.KvKey): Promise<T | null | typeof KV_NOT_FOUND> {
 	const kv = await ensureKv(); // Use await
 	const result = await kv.get<T>(key);
-	return result.value ?? null;
+
+	if (result.versionstamp === null) {
+		// versionstamp 为 null 表示键不存在
+		return KV_NOT_FOUND;
+	} else {
+		// versionstamp 存在，表示键存在，返回其值 (可能是 null)
+		return result.value;
+	}
 }
 
 /** [内部] 设置任意类型的单个 KV 值 (写入 KV 并更新 Edge Cache) */
@@ -145,15 +164,20 @@ async function _deleteKvKey(key: Deno.KvKey): Promise<void> {
 	await kv.delete(key);
 	// 2. 更新 Edge Cache 为默认值 (Write-Through for delete)
 	const cacheKey = key.join('_');
-	const defaultValue = DEFAULT_VALUES[cacheKey]; // 获取该键的默认值
-	await setEdgeCacheValue(cacheKey, defaultValue, WRITE_THROUGH_TTL_SECONDS);
-	// console.log(`Deleted KV and set Edge Cache to default for key: ${cacheKey}`);
+	// 删除 KV 后，将缓存值设为 null 来表示删除或不存在
+	await setEdgeCacheValue(cacheKey, null, WRITE_THROUGH_TTL_SECONDS);
+	// console.log(`Deleted KV and set Edge Cache to null for key: ${cacheKey}`);
 }
 
 /** [内部] 从 KV 获取字符串列表 (仅限内部需要直接读 KV 的场景) */
 async function _getList(key: Deno.KvKey): Promise<string[]> {
 	// 保持这个函数，因为 _addItemToSet 和 _removeItemFromList 需要先读 KV
-	return (await _getKvValue<string[]>(key)) || [];
+	// 使用导出的函数，并处理 KV_NOT_FOUND
+	const result = await getKvValueDirectly<string[]>(key);
+	if (result === KV_NOT_FOUND || result === null) {
+		return []; // 如果未找到或值为 null，返回空数组
+	}
+	return result; // 否则返回获取到的数组
 }
 
 /** [内部] 向 KV 中存储的列表（视为 Set）添加单个唯一字符串 (写入 KV 并更新 Edge Cache) */
@@ -249,10 +273,11 @@ async function _clearList(key: Deno.KvKey, listName: string): Promise<void> {
 
 // --- 触发密钥管理 ---
 
-/** [重构] 从 Edge Cache 获取触发密钥 (Set) */
+/** [修改] 直接从 KV 获取触发密钥 (Set) (用于管理) */
 export async function getTriggerKeys(): Promise<Set<string>> {
-	const keys = await getConfigValue<string[]>(CACHE_KEYS.TRIGGER_KEYS, DEFAULT_VALUES[CACHE_KEYS.TRIGGER_KEYS]);
-	return new Set(keys || []);
+	const result = await getKvValueDirectly<string[]>(TRIGGER_KEYS_KEY);
+	const keys = (result === KV_NOT_FOUND || result === null) ? [] : result;
+	return new Set(keys);
 }
 
 /** [重构] 添加触发密钥 (调用 _addItemToSet) */
@@ -275,9 +300,10 @@ export async function isTriggerKey(providedKey: string | null): Promise<boolean>
 
 // --- 主密钥池管理 ---
 
-/** [重构] 获取主密钥池中的所有密钥 (Array) (从 Edge Cache 读取) */
+/** [修改] 直接从 KV 获取主密钥池中的所有密钥 (Array) (用于管理) */
 export async function getPoolKeys(): Promise<string[]> {
-	return await getConfigValue<string[]>(CACHE_KEYS.POOL_KEYS, DEFAULT_VALUES[CACHE_KEYS.POOL_KEYS]);
+	const result = await getKvValueDirectly<string[]>(POOL_KEYS_KEY);
+	return (result === KV_NOT_FOUND || result === null) ? [] : result;
 }
 
 /** [重构] 添加密钥到主密钥池 (调用 _addItemsToList) */
@@ -312,9 +338,10 @@ export async function getNextPoolKey(): Promise<string | null> {
 
 // --- 指定密钥 (Fallback Key) 管理 ---
 
-/** [重构] 获取指定密钥 (从 Edge Cache 读取) */
+/** [修改] 直接从 KV 获取指定密钥 (用于管理) */
 export async function getFallbackKey(): Promise<string | null> {
-	return await getConfigValue<string | null>(CACHE_KEYS.FALLBACK_KEY, DEFAULT_VALUES[CACHE_KEYS.FALLBACK_KEY]);
+	const result = await getKvValueDirectly<string>(FALLBACK_KEY_KEY);
+	return result === KV_NOT_FOUND ? null : result;
 }
 
 /** [重构] 设置指定密钥 (调用 _setKvValue/_deleteKvKey) */
@@ -331,10 +358,11 @@ export async function setFallbackKey(key: string | null): Promise<void> {
 
 // --- 指定密钥触发模型 (Fallback Models) 管理 ---
 
-/** [重构] 获取触发指定密钥的模型列表 (Set) (从 Edge Cache 读取) */
+/** [修改] 直接从 KV 获取触发指定密钥的模型列表 (Set) (用于管理) */
 export async function getFallbackModels(): Promise<Set<string>> {
-	const models = await getConfigValue<string[]>(CACHE_KEYS.FALLBACK_MODELS, DEFAULT_VALUES[CACHE_KEYS.FALLBACK_MODELS]);
-	return new Set(models || []);
+	const result = await getKvValueDirectly<string[]>(FALLBACK_MODELS_KEY);
+	const models = (result === KV_NOT_FOUND || result === null) ? [] : result;
+	return new Set(models);
 }
 
 /** [重构] 添加指定密钥触发模型 (调用 _addItemsToList) */
@@ -350,9 +378,12 @@ export async function clearFallbackModels(): Promise<void> {
 
 // --- API 重试次数管理 ---
 
-/** [重构] 获取 API 调用最大重试次数 (从 Edge Cache 读取) */
+/** [修改] 直接从 KV 获取 API 调用最大重试次数 (用于管理) */
 export async function getApiRetryLimit(): Promise<number> {
-	return await getConfigValue<number>(CACHE_KEYS.API_RETRY_LIMIT, DEFAULT_VALUES[CACHE_KEYS.API_RETRY_LIMIT]);
+	const result = await getKvValueDirectly<number>(API_RETRY_LIMIT_KEY);
+	const limit = (result === KV_NOT_FOUND || result === null) ? null : result;
+	// 如果 KV 中未找到、为 null 或无效，则使用默认值 3
+	return limit !== null && Number.isInteger(limit) && limit >= 1 ? limit : 3;
 }
 
 /** [重构] 设置 API 调用最大重试次数 (调用 _setKvValue) */
@@ -382,9 +413,10 @@ export async function setGcpCredentialsString(credentials: string | null): Promi
 	}
 }
 
-/** [重构] 获取 GCP 凭证字符串 (从 Edge Cache 读取) */
+/** [修改] 直接从 KV 获取 GCP 凭证字符串 (用于管理) */
 export async function getGcpCredentialsString(): Promise<string | null> {
-	return await getConfigValue<string | null>(CACHE_KEYS.GCP_CREDENTIALS_STRING, DEFAULT_VALUES[CACHE_KEYS.GCP_CREDENTIALS_STRING]);
+	const result = await getKvValueDirectly<string>(GCP_CREDENTIALS_STRING_KEY);
+	return result === KV_NOT_FOUND ? null : result;
 }
 
 // --- GCP 凭证解析 (保持不变) ---
@@ -450,18 +482,22 @@ export async function setGcpDefaultLocation(location: string | null): Promise<vo
 	}
 }
 
-/** [重构] 获取默认 GCP Location (从 Edge Cache 读取) */
+/** [修改] 直接从 KV 获取默认 GCP Location (用于管理) */
 export async function getGcpDefaultLocation(): Promise<string> {
-	return await getConfigValue<string>(CACHE_KEYS.GCP_DEFAULT_LOCATION, DEFAULT_VALUES[CACHE_KEYS.GCP_DEFAULT_LOCATION]);
+	const result = await getKvValueDirectly<string>(GCP_DEFAULT_LOCATION_KEY);
+	const location = (result === KV_NOT_FOUND || result === null) ? null : result;
+	// 如果 KV 中未找到或为 null，则使用默认值 'global'
+	return location || 'global';
 }
 
 
 // --- Vertex AI 模型列表管理 ---
 
-/** [重构] 获取触发 Vertex AI 代理的模型列表 (Set) (从 Edge Cache 读取) */
+/** [修改] 直接从 KV 获取触发 Vertex AI 代理的模型列表 (Set) (用于管理) */
 export async function getVertexModels(): Promise<Set<string>> {
-	const models = await getConfigValue<string[]>(CACHE_KEYS.VERTEX_MODELS, DEFAULT_VALUES[CACHE_KEYS.VERTEX_MODELS]);
-	return new Set(models || []);
+	const result = await getKvValueDirectly<string[]>(VERTEX_MODELS_KEY);
+	const models = (result === KV_NOT_FOUND || result === null) ? [] : result;
+	return new Set(models);
 }
 
 /** [重构] 添加 Vertex AI 模型 (调用 _addItemsToList) */
@@ -483,9 +519,10 @@ export async function isVertexModel(modelName: string | null): Promise<boolean> 
 
 // --- API 路径映射管理 ---
 
-/** [重构] 获取 API 路径映射 (从 Edge Cache 读取) */
+/** [修改] 直接从 KV 获取 API 路径映射 (用于管理) */
 export async function getApiMappings(): Promise<Record<string, string>> {
-	return await getConfigValue<Record<string, string>>(CACHE_KEYS.API_MAPPINGS, DEFAULT_VALUES[CACHE_KEYS.API_MAPPINGS]);
+	const result = await getKvValueDirectly<Record<string, string>>(API_MAPPINGS_KEY);
+	return (result === KV_NOT_FOUND || result === null) ? {} : result;
 }
 
 /** [重构] 设置 API 路径映射 (调用 _setKvValue) */
@@ -566,6 +603,4 @@ export async function getApiKeyForRequest(
 	return null; // 触发密钥，但无法匹配 Fallback 且 Pool 为空，返回 null
 }
 
-// 移除不再使用的 _getKvValue 和 _getList 的导出
-// _getKvValue 不再需要导出
-// _getList 仍然被 _addItemToSet 和 _removeItemFromList 使用，保留内部定义
+// _getKvValue 和 _getList 仅为内部函数，无需导出

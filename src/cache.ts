@@ -1,9 +1,9 @@
 import {
 	ensureKv, // 确保 kv 实例存在
-	// _getKvValue, // 不再需要直接从 cache 模块导出原始 KV 读取
-	// _getList, // 不再需要直接从 cache 模块导出原始 KV 读取
 	parseCreds, // 解析 GCP 凭证 (保持)
 	GcpCredentials, // GCP 凭证类型 (保持)
+	getKvValueDirectly, // [新增] 直接从 KV 读取值的函数
+	KV_NOT_FOUND, // [新增] 导入表示 KV 未找到的 Symbol
 } from "./replacekeys.ts"; // 从 replacekeys 导入常量和类型
 
 // --- Edge Cache 实例 ---
@@ -15,7 +15,7 @@ async function getEdgeCache(): Promise<Cache> {
 	if (!edgeCache) {
 		try {
 			edgeCache = await caches.open(CACHE_NAME);
-			console.log(`Edge Cache "${CACHE_NAME}" opened successfully.`);
+			// console.log(`Edge Cache "${CACHE_NAME}" opened successfully.`); // 减少日志噪音
 		} catch (error) {
 			console.error(`Failed to open Edge Cache "${CACHE_NAME}":`, error);
 			// 在无法打开缓存时抛出错误，以便调用者知道
@@ -54,26 +54,13 @@ const PRELOAD_KV_KEYS: Deno.KvKey[] = [
 	["vertex_models"],
 ];
 
-// --- 默认值映射 (用于处理 KV 中不存在的键或缓存读取失败) (导出以供 replacekeys 使用) ---
-export const DEFAULT_VALUES: Record<string, any> = {
-	[CACHE_KEYS.ADMIN_PASSWORD_HASH]: null,
-	[CACHE_KEYS.TRIGGER_KEYS]: [],
-	[CACHE_KEYS.POOL_KEYS]: [],
-	[CACHE_KEYS.FALLBACK_KEY]: null,
-	[CACHE_KEYS.FALLBACK_MODELS]: [],
-	[CACHE_KEYS.API_RETRY_LIMIT]: 3,
-	[CACHE_KEYS.API_MAPPINGS]: {},
-	[CACHE_KEYS.GCP_CREDENTIALS_STRING]: null,
-	[CACHE_KEYS.GCP_DEFAULT_LOCATION]: 'global',
-	[CACHE_KEYS.VERTEX_MODELS]: [],
-};
 
 /**
- * [内部] 将值存入 Edge Cache
- * @param cacheKey 缓存键 (string)
- * @param value 要缓存的值 (会被 JSON.stringify)
- * @param ttlSeconds 可选的 TTL (秒)，用于设置 Cache-Control max-age
- */
+	* [内部] 将值存入 Edge Cache
+	* @param cacheKey 缓存键 (string)
+	* @param value 要缓存的值 (会被 JSON.stringify)。可以是 null 或 undefined。
+	* @param ttlSeconds 可选的 TTL (秒)，用于设置 Cache-Control max-age
+	*/
 export async function setEdgeCacheValue(cacheKey: string, value: any, ttlSeconds?: number): Promise<void> {
 	try {
 		const cache = await getEdgeCache();
@@ -81,164 +68,100 @@ export async function setEdgeCacheValue(cacheKey: string, value: any, ttlSeconds
 		if (ttlSeconds && ttlSeconds > 0) {
 			headers.set('Cache-Control', `max-age=${ttlSeconds}`);
 		}
-		// Edge Cache 使用 Request 对象作为 key
-		// 使用一个固定的基础 URL，并将 cacheKey 作为路径的一部分
 		const request = new Request(`http://cache.internal/${encodeURIComponent(cacheKey)}`);
-		// 确保 value 是可序列化的，null 也需要处理
-		const body = value === undefined ? null : JSON.stringify(value);
+		// 将 undefined 转换为 null 进行存储，因为 JSON 不支持 undefined
+		const body = JSON.stringify(value === undefined ? null : value);
 		const response = new Response(body, { headers });
 		await cache.put(request, response);
 		// console.log(`Edge Cache: Set value for key "${cacheKey}"`);
 	} catch (error) {
 		console.error(`Error setting Edge Cache for key "${cacheKey}":`, error);
-		// 写入缓存失败通常不应中断主流程，仅记录错误
 	}
 }
 
 /**
- * [核心] 从 Edge Cache 获取配置值，实现 Cache-Aside 模式
- * 1. 尝试读取 Edge Cache
- * 2. 缓存命中且有效 -> 返回缓存值
- * 3. 缓存未命中或无效 -> 尝试读取 Deno KV
- * 4. KV 命中且有效 -> 写入缓存，返回 KV 值
- * 5. KV 未命中或无效 -> 使用硬编码默认值，写入缓存，返回默认值
- * 6. 任何步骤出错 -> 安全回退到硬编码默认值
- *
- * @param cacheKey 缓存键 (string)
- * @param _defaultValue 硬编码的默认值 (仅用于类型提示和最终回退)
- * @returns 解析后的值或最终的硬编码默认值
- */
-export async function getConfigValue<T>(cacheKey: string, _defaultValue: T): Promise<T> {
-	const hardcodedDefaultValue = DEFAULT_VALUES[cacheKey] as T; // 获取此键的最终后备默认值
-
+	* [核心] 从 Edge Cache 获取配置值。
+	* [重构] 从 Edge Cache 获取配置值，如果未命中、过期或无效，则回退到从 Deno KV 读取。
+	* @param cacheKey 缓存键 (string, e.g., "trigger_keys")
+	* @returns 解析后的值 (来自缓存或 KV)，如果两者都失败则返回 null。
+	*/
+export async function getConfigValue<T>(cacheKey: string): Promise<T | null> {
 	// 1. 尝试从 Edge Cache 获取
-	let cachedData: T | undefined = undefined;
-	let isCacheValid = false;
 	try {
 		const cache = await getEdgeCache();
 		const request = new Request(`http://cache.internal/${encodeURIComponent(cacheKey)}`);
 		const cachedResponse = await cache.match(request);
 
 		if (cachedResponse) {
-			console.log(`[getConfigValue:${cacheKey}] Cache Hit.`);
+			// 检查响应是否仍然有效（未过期） - Deno Deploy 的 Cache API 会自动处理 max-age
+			// 我们只需要检查内容类型和解析
 			const contentType = cachedResponse.headers.get('content-type');
 			if (contentType && contentType.includes('application/json')) {
 				const text = await cachedResponse.text();
-				// 尝试解析，即使是 'null' 或空字符串
 				try {
-					cachedData = JSON.parse(text || 'null'); // 空字符串解析为 null
-					isCacheValid = true; // 成功解析 JSON 即视为有效
-					console.log(`[getConfigValue:${cacheKey}] Parsed cached data:`, cachedData, `(Type: ${typeof cachedData})`);
+					const data = JSON.parse(text || 'null'); // 空字符串解析为 null
+					// console.log(`[getConfigValue:${cacheKey}] Cache Hit. Returning cached data.`);
+					// 缓存命中且有效，直接返回
+					return data as T | null;
 				} catch (parseError) {
-					console.error(`[getConfigValue:${cacheKey}] Error parsing JSON from Edge Cache:`, parseError);
-					// 解析失败，视为缓存无效
+					console.warn(`[getConfigValue:${cacheKey}] Cache Hit but failed to parse JSON: ${parseError}. Falling back to KV.`);
+					// 解析失败，视为缓存无效，继续执行 KV 回退
 				}
 			} else {
-				console.warn(`[getConfigValue:${cacheKey}] Cached data is not JSON (Content-Type: ${contentType}). Cache considered invalid.`);
+				console.warn(`[getConfigValue:${cacheKey}] Cache Hit but invalid Content-Type: ${contentType}. Falling back to KV.`);
+				// 非 JSON 视为缓存无效，继续执行 KV 回退
 			}
 		} else {
-			console.log(`[getConfigValue:${cacheKey}] Cache Miss.`);
+			// console.log(`[getConfigValue:${cacheKey}] Cache Miss. Falling back to KV.`);
+			// 缓存未命中，继续执行 KV 回退
 		}
 	} catch (cacheError) {
-		console.error(`[getConfigValue:${cacheKey}] Error accessing Edge Cache:`, cacheError);
-		// 访问缓存出错，继续尝试 KV
+		console.error(`[getConfigValue:${cacheKey}] Error accessing Edge Cache: ${cacheError}. Falling back to KV.`);
+		// 访问缓存出错，继续执行 KV 回退
 	}
 
-	// 2. 缓存命中且有效 -> 直接返回
-	if (isCacheValid && cachedData !== undefined) {
-		console.log(`[getConfigValue:${cacheKey}] Returning valid data from cache.`);
-		// 注意：这里需要进行类型断言，因为 cachedData 的类型可能与 T 不完全匹配
-		// 但由于我们信任缓存中的有效 JSON，这里暂时接受它
-		// 可以在返回前添加更严格的类型检查，但这会增加复杂性
-		return cachedData as T;
-	}
-
-	// 3. 缓存未命中或无效 -> 尝试读取 Deno KV
-	console.log(`[getConfigValue:${cacheKey}] Proceeding to fetch from KV (due to cache miss or invalid cache).`);
-	let valueFromKv: T | undefined = undefined;
-	let isKvValid = false;
+	// 2. 回退到从 Deno KV 读取
+	console.log(`[getConfigValue:${cacheKey}] Attempting KV fallback...`);
 	try {
-		const kv = await ensureKv();
-		const kvKeyArray = cacheKey.split('_');
-		if (kvKeyArray.length === 0 || kvKeyArray.some(k => typeof k !== 'string')) {
-			throw new Error(`Invalid cacheKey format for KV lookup: "${cacheKey}"`);
-		}
-		const kvKey: Deno.KvKey = kvKeyArray;
-		const kvResult = await kv.get<any>(kvKey);
-		console.log(`[getConfigValue:${cacheKey}] KV get result:`, { versionstamp: kvResult?.versionstamp, valueExists: kvResult?.value !== null && kvResult?.value !== undefined });
+		// 将 cacheKey (e.g., "trigger_keys") 转换回 Deno.KvKey (e.g., ["trigger_keys"])
+		const kvKey: Deno.KvKey = cacheKey.split('_');
+		const kvResult = await getKvValueDirectly<T>(kvKey); // 调用从 replacekeys 导出的函数
 
-		// 4. KV 命中 -> 验证并处理
-		if (kvResult.value !== null && kvResult.value !== undefined) {
-			let potentialValue = kvResult.value;
-			console.log(`[getConfigValue:${cacheKey}] Raw KV value:`, potentialValue, `(Type: ${typeof potentialValue})`);
-
-			// --- 应用特殊验证/处理逻辑 ---
-			let validationPassed = true;
-			if (
-				[CACHE_KEYS.TRIGGER_KEYS, CACHE_KEYS.POOL_KEYS, CACHE_KEYS.FALLBACK_MODELS, CACHE_KEYS.VERTEX_MODELS].includes(cacheKey) &&
-				!Array.isArray(potentialValue)
-			) {
-				console.warn(`KV value for ${cacheKey} is not an array. Validation failed.`);
-				validationPassed = false;
-			}
-			if (cacheKey === CACHE_KEYS.API_MAPPINGS && (typeof potentialValue !== 'object' || potentialValue === null || Array.isArray(potentialValue))) {
-				console.warn(`KV value for ${cacheKey} is not a valid object. Validation failed.`);
-				validationPassed = false;
-			}
-			if (cacheKey === CACHE_KEYS.API_RETRY_LIMIT) {
-				if (typeof potentialValue !== 'number' || !Number.isInteger(potentialValue) || potentialValue < 1) {
-					console.warn(`KV value for ${cacheKey} is not a valid positive integer (${potentialValue}). Validation failed.`);
-					validationPassed = false;
-				}
-			}
-			// --- 结束特殊处理 ---
-
-			if (validationPassed) {
-				valueFromKv = potentialValue as T;
-				isKvValid = true;
-				console.log(`[getConfigValue:${cacheKey}] KV value passed validation.`);
-			} else {
-				console.warn(`[getConfigValue:${cacheKey}] KV value failed validation. Will use hardcoded default.`);
-			}
+		if (kvResult === KV_NOT_FOUND) {
+			// KV 中确实没有找到这个键
+			console.warn(`[getConfigValue:${cacheKey}] KV Fallback: Key not found in KV.`);
+			// 不需要更新缓存，因为源头就没有
+			return null;
 		} else {
-			console.log(`[getConfigValue:${cacheKey}] KV value is null or undefined.`);
+			// KV 中找到了键，其值可能是 T 或 null
+			console.log(`[getConfigValue:${cacheKey}] KV Fallback successful. Updating cache and returning KV value (which might be null).`);
+			// 将从 KV 读取到的值 (T 或 null) 写回缓存
+			setEdgeCacheValue(cacheKey, kvResult).catch(err => { // kvResult 可能是 null
+				console.error(`[getConfigValue:${cacheKey}] Error updating cache after KV fallback:`, err);
+			});
+			// 返回从 KV 获取的值 (T 或 null)，这符合函数的 Promise<T | null> 返回类型
+			return kvResult;
 		}
 	} catch (kvError) {
-		console.error(`[getConfigValue:${cacheKey}] Error fetching or processing KV value:`, kvError);
-		// KV 访问或处理出错，将使用硬编码默认值
+		console.error(`[getConfigValue:${cacheKey}] Error during KV fallback:`, kvError);
+		return null; // KV 读取过程中发生错误，返回 null
 	}
-
-	// 5. 决定最终使用的值并写入缓存
-	let finalValue: T;
-	if (isKvValid && valueFromKv !== undefined) {
-		finalValue = valueFromKv;
-		console.log(`[getConfigValue:${cacheKey}] Using validated value from KV.`);
-	} else {
-		finalValue = hardcodedDefaultValue; // 使用硬编码默认值
-		console.log(`[getConfigValue:${cacheKey}] Using hardcoded default value.`);
-	}
-
-	// 写入缓存（无论是来自 KV 的有效值还是硬编码默认值）
-	try {
-		console.log(`[getConfigValue:${cacheKey}] Caching final value:`, finalValue, `(Type: ${typeof finalValue})`);
-		await setEdgeCacheValue(cacheKey, finalValue); // 默认永不过期
-	} catch (cacheWriteError) {
-		console.error(`[getConfigValue:${cacheKey}] Failed to write final value back to Edge Cache:`, cacheWriteError);
-		// 缓存写入失败不应阻止返回结果
-	}
-
-	// 6. 返回最终值
-	return finalValue;
 }
 
 
 /**
- * [核心] 并行加载所有指定的 KV 配置到 Edge Cache
- * 在应用启动时调用，用于预热缓存。
- */
+	* [核心] 并行加载所有指定的 KV 配置到 Edge Cache
+	*/
 export async function loadAndCacheAllKvConfigs(): Promise<void> {
 	console.log("Starting KV config preloading to Edge Cache...");
-	const kv = await ensureKv(); // Use await: 确保 KV 已打开
+	let kv: Deno.Kv;
+	try {
+		kv = await ensureKv(); // Use await: 确保 KV 已打开
+	} catch (kvError) {
+		console.error("Failed to open KV store during preloading:", kvError);
+		return; // 无法打开 KV，无法预加载
+	}
+
 	try {
 		// 1. 从 KV 并行获取所有需要预加载的值
 		const results = await kv.getMany<any>(PRELOAD_KV_KEYS);
@@ -246,31 +169,14 @@ export async function loadAndCacheAllKvConfigs(): Promise<void> {
 
 		const cachePromises: Promise<void>[] = [];
 
-		// 2. 遍历 KV 结果，处理默认值和类型，并写入 Edge Cache
+		// 2. 遍历 KV 结果，直接将获取到的值 (包括 null/undefined) 写入 Edge Cache
 		PRELOAD_KV_KEYS.forEach((kvKey, index) => {
 			const cacheKey = kvKey.join('_'); // 生成对应的缓存键字符串
 			const entry = results[index];
-			let value = entry?.value ?? DEFAULT_VALUES[cacheKey]; // 使用默认值处理 null/undefined
+			const value = entry?.value; // 直接使用 KV 的值，可能是 null 或 undefined
 
-			// --- 应用与之前相同的特殊处理逻辑 (保持不变) ---
-			if (
-				[CACHE_KEYS.TRIGGER_KEYS, CACHE_KEYS.POOL_KEYS, CACHE_KEYS.FALLBACK_MODELS, CACHE_KEYS.VERTEX_MODELS].includes(cacheKey) &&
-				!Array.isArray(value)
-			) {
-				console.warn(`KV value for ${cacheKey} was not an array, defaulting to []`);
-				value = DEFAULT_VALUES[cacheKey];
-			}
-			if (cacheKey === CACHE_KEYS.API_MAPPINGS && (typeof value !== 'object' || value === null || Array.isArray(value))) { // 更严格的对象检查
-				console.warn(`KV value for ${cacheKey} was not a valid object, defaulting to {}`);
-				value = DEFAULT_VALUES[cacheKey];
-			}
-			if (cacheKey === CACHE_KEYS.API_RETRY_LIMIT) {
-				if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
-					console.warn(`KV value for ${cacheKey} was invalid (${value}), defaulting to ${DEFAULT_VALUES[cacheKey]}`);
-					value = DEFAULT_VALUES[cacheKey];
-				}
-			}
-			// --- 结束特殊处理 ---
+			// --- [移除] 特殊处理逻辑 ---
+			// 不再检查类型或应用默认值
 
 			// 将写缓存操作添加到 Promise 数组 (默认永不过期)
 			cachePromises.push(setEdgeCacheValue(cacheKey, value));
@@ -281,57 +187,34 @@ export async function loadAndCacheAllKvConfigs(): Promise<void> {
 		console.log("KV config preloading to Edge Cache finished successfully.");
 
 	} catch (error) {
-		console.error("Error during KV config preloading to Edge Cache:", error);
-		// 预加载失败时，尝试用默认值填充 Edge Cache (作为后备)
-		console.warn("Falling back to setting default values in Edge Cache due to preload error.");
-		const fallbackPromises: Promise<void>[] = [];
-		PRELOAD_KV_KEYS.forEach(kvKey => {
-			const cacheKey = kvKey.join('_');
-			// 写入默认值到缓存
-			fallbackPromises.push(setEdgeCacheValue(cacheKey, DEFAULT_VALUES[cacheKey]));
-		});
-		try {
-			await Promise.all(fallbackPromises);
-			console.log("Successfully set default values in Edge Cache as fallback.");
-		} catch (fallbackError) {
-			console.error("Error setting default values in Edge Cache during fallback:", fallbackError);
-		}
+		console.error("Error during KV config preloading process:", error);
+		// 预加载失败不再尝试写入默认值
 	}
 }
 
 /**
- * [核心] 从 KV 重新加载单个配置项并更新 Edge Cache
- * 当通过管理 API 修改配置时调用。
- * @param kvKey Deno.KvKey 数组 (例如 ["trigger_keys"])
- */
+	* [核心] 从 KV 重新加载单个配置项并更新 Edge Cache
+	* 当通过管理 API 修改配置时调用。
+	* 移除类型检查和默认值回退。
+	* @param kvKey Deno.KvKey 数组 (例如 ["trigger_keys"])
+	*/
 export async function reloadKvConfig(kvKey: Deno.KvKey): Promise<void> {
 	const cacheKey = kvKey.join('_');
 	console.log(`Reloading KV config to Edge Cache for key: ${cacheKey}`);
+	let kv: Deno.Kv;
 	try {
-		const kv = await ensureKv(); // Use await
+		kv = await ensureKv(); // Use await
+	} catch (kvError) {
+		console.error(`Failed to open KV store during reload for key "${cacheKey}":`, kvError);
+		return; // 无法打开 KV，无法重新加载
+	}
+
+	try {
 		// 1. 从 KV 读取最新的值
 		const result = await kv.get<any>(kvKey);
-		let value = result?.value ?? DEFAULT_VALUES[cacheKey]; // 使用默认值处理 null/undefined
+		const value = result?.value; // 直接使用 KV 的值，可能是 null 或 undefined
 
-		// --- 应用与 loadAndCacheAllKvConfigs 中相同的特殊处理逻辑 (保持不变) ---
-		if (
-			[CACHE_KEYS.TRIGGER_KEYS, CACHE_KEYS.POOL_KEYS, CACHE_KEYS.FALLBACK_MODELS, CACHE_KEYS.VERTEX_MODELS].includes(cacheKey) &&
-			!Array.isArray(value)
-		) {
-			console.warn(`Reloaded KV value for ${cacheKey} was not an array, defaulting to []`);
-			value = DEFAULT_VALUES[cacheKey];
-		}
-		if (cacheKey === CACHE_KEYS.API_MAPPINGS && (typeof value !== 'object' || value === null || Array.isArray(value))) {
-			console.warn(`Reloaded KV value for ${cacheKey} was not a valid object, defaulting to {}`);
-			value = DEFAULT_VALUES[cacheKey];
-		}
-		if (cacheKey === CACHE_KEYS.API_RETRY_LIMIT) {
-			if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
-				console.warn(`Reloaded KV value for ${cacheKey} was invalid (${value}), defaulting to ${DEFAULT_VALUES[cacheKey]}`);
-				value = DEFAULT_VALUES[cacheKey];
-			}
-		}
-		// --- 结束特殊处理 ---
+		// --- [移除] 特殊处理逻辑 ---
 
 		// 2. 将新值写入 Edge Cache (覆盖旧值, 默认永不过期)
 		await setEdgeCacheValue(cacheKey, value);
@@ -343,24 +226,21 @@ export async function reloadKvConfig(kvKey: Deno.KvKey): Promise<void> {
 		}
 	} catch (error) {
 		console.error(`Error reloading KV config to Edge Cache for "${cacheKey}":`, error);
-		// 可选：添加错误处理逻辑，例如尝试恢复旧缓存值或设置默认值
-		// 简单起见，这里只记录错误，缓存可能暂时不一致
 	}
 }
 
 /**
- * [核心] 读取并解析 GCP 凭证字符串 (从 Edge Cache)
- * 不再缓存 Auth 实例。由 proxy_handler 按需创建。
- * @returns 解析后的 GcpCredentials 数组，如果缓存中没有或解析失败则返回空数组。
- */
+	* [核心] 读取并解析 GCP 凭证字符串 (从 Edge Cache)
+	* 不再缓存 Auth 实例。由 proxy_handler 按需创建。
+	* @returns 解析后的 GcpCredentials 数组，如果缓存中没有或解析失败则返回空数组。
+	*/
 export async function getParsedGcpCredentials(): Promise<GcpCredentials[]> {
-	// console.log("Getting GCP credentials string from Edge Cache...");
-	// 1. 使用 getConfigValue 从 Edge Cache 读取凭证字符串
-	const jsonStr = await getConfigValue<string | null>(CACHE_KEYS.GCP_CREDENTIALS_STRING, null);
+	// 1. 使用重构后的 getConfigValue 从缓存或 KV 读取凭证字符串
+	const jsonStr = await getConfigValue<string>(CACHE_KEYS.GCP_CREDENTIALS_STRING); // 不再需要默认值
 
 	if (!jsonStr) {
-		// console.log("No GCP credentials string found in Edge Cache.");
-		return []; // 缓存中没有，返回空数组
+		console.log("No GCP credentials string found in Cache or KV.");
+		return []; // 缓存中没有或读取失败，返回空数组
 	}
 
 	try {
@@ -378,5 +258,4 @@ export async function getParsedGcpCredentials(): Promise<GcpCredentials[]> {
 	}
 }
 
-// 移除所有与旧内存缓存、GCP Auth 实例缓存相关的代码
-// 例如：initializeAndCacheGcpAuth, globalCache, GCP_AUTH_INSTANCES_KEY 等
+// End of file

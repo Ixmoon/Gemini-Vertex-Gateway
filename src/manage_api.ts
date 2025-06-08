@@ -2,6 +2,7 @@
 import { Hono, Context } from "hono";
 import { cors } from "hono/middleware";
 import * as kvOps from "./replacekeys.ts";
+import { ensureKv } from "./replacekeys.ts"; // [新增] 导入 ensureKv
 
 // --- 辅助函数 (从 deno_index.ts 复制，理想状态应导入或使用 c.json) ---
 /** 创建 JSON 错误响应 */
@@ -24,6 +25,14 @@ function createSuccessPayload(data: Record<string, any>, status: number = 200): 
 
 // 管理员密码认证中间件
 const adminAuthMiddleware = async (c: Context, next: () => Promise<void>) => {
+	try {
+		// [新增] 确保 KV 连接在执行管理操作前已建立
+		await ensureKv();
+	} catch (kvError) {
+		console.error("Manage API: Failed to ensure KV connection in auth middleware:", kvError);
+		return c.json({ error: "Internal Server Error: Could not connect to data store." }, 500);
+	}
+
 	const adminPassword = c.req.header('X-Admin-Password');
 	if (!adminPassword) {
 		return c.json({ error: "Unauthorized: Missing X-Admin-Password header" }, 401);

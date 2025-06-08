@@ -139,27 +139,8 @@ console.error("FATAL: Failed to open KV store during startup:", kvError);
 throw new Error("Failed to initialize KV store."); // 抛出错误阻止启动
 }
 
-// --- [临时补救措施] 强制刷新所有配置到 Edge Cache ---
-console.log("[TEMP] Forcing refresh of all KV configs into Edge Cache at startup...");
-try {
-await loadAndCacheAllKvConfigs(); // <--- 调用缓存刷新函数
-console.log("[TEMP] Force refresh completed successfully.");
-} catch (refreshError) {
-console.error("[TEMP] Error during forced cache refresh:", refreshError);
-console.warn("[TEMP] Server starting with potentially stale or default cache due to refresh error.");
-}
-// --- 结束临时补救措施 ---
-
-// try {
-// 	console.log("Starting KV config preloading...");
-// 	await loadAndCacheAllKvConfigs(); // 预加载所有 KV 配置到缓存
-// 	console.log("KV configs cached. Initializing GCP Auth instances...");
-// 	await initializeAndCacheGcpAuth();  // 基于缓存的凭证初始化 GCP Auth 实例
-// 	console.log("GCP Auth initialized successfully.");
-// } catch (error) {
-// 	console.error("Error during parallel startup initialization:", error);
-// 	console.warn("Server might start with incomplete initialization due to errors.");
-// }
+// --- [移除] 移除所有启动时预加载缓存的逻辑 ---
+// 缓存将在第一个请求处理完成后通过 waitUntil 在后台填充
 
 // 启动服务器 (保持不变)
 Deno.serve({ port }, app.fetch);
