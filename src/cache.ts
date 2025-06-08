@@ -37,6 +37,7 @@ export const CACHE_KEYS = {
 	GCP_CREDENTIALS_STRING: "gcp_credentials_string",
 	GCP_DEFAULT_LOCATION: "gcp_default_location",
 	VERTEX_MODELS: "vertex_models",
+	GCP_AUTH_TOKEN_PREFIX: "gcp_auth_token_", // Prefix for storing tokens per client_email
 };
 
 // --- 所有需要预加载的 KV 键数组 (Deno.KvKey[]) (保持不变) ---

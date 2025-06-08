@@ -5,25 +5,23 @@ import { GoogleAuth } from "google-auth-library";
 import {
 	// openKv, // 不再直接需要，由 replacekeys 内部管理
 	getApiKeyForRequest, // 核心逻辑，已改为 async
-	isTriggerKey,        // 已改为 async
-	getNextPoolKey,      // 已改为 async
-	isVertexModel,       // 已改为 async
-	ApiKeySource,        // 类型定义
-	ApiKeyResult,        // 类型定义
-	// parseCreds, // 由 cache.ts 的 getParsedGcpCredentials 内部使用
-	GcpCredentials,      // 类型定义
-	getApiRetryLimit,    // 已改为 async
-	getGcpDefaultLocation, // 已改为 async
-	getApiMappings,      // 已改为 async
-	ensureKv,            // [新增] 导入 ensureKv 用于队列
+	isTriggerKey,		// 已改为 async
+	getNextPoolKey,	  // 已改为 async
+	isVertexModel,	   // 已改为 async
+	ApiKeySource,		// 类型定义
+	ApiKeyResult,		// 类型定义
+	GcpCredentials,	  // 类型定义
+	getApiRetryLimitFromCache, // [新增] 从缓存读取重试次数
+	getGcpDefaultLocationFromCache, // [新增] 从缓存读取 GCP 位置
+	isValidCred, // Import from replacekeys
 } from "./replacekeys.ts";
 // 导入 Edge Cache 相关函数
-import { getParsedGcpCredentials, loadAndCacheAllKvConfigs } from "./cache.ts"; // [新增] 导入 loadAndCacheAllKvConfigs
-
-// 移除本地 GCP Token 缓存相关定义 (不再需要)
-// const GCP_TOKEN_CACHE_TTL = 5 * 60 * 1000;
-// interface GcpTokenCacheEntry { token: string; expires: number; }
-// const gcpTokenCache = new Map<string, GcpTokenCacheEntry>(); // projectId -> token
+import {
+	getConfigValue,
+	getParsedGcpCredentials,
+	setEdgeCacheValue, // [新增] 导入设置缓存的函数
+	CACHE_KEYS
+} from "./cache.ts";
 
 // === 类型定义 (保持不变) ===
 
@@ -81,15 +79,8 @@ const getApiKey = (c: Context): string | null => {
 
 // === GCP 凭证处理 ===
 
-// isValidCred 保持不变
-const isValidCred = (cred: any): cred is GcpCredentials =>
-	cred?.type &&
-	cred?.project_id &&
-	cred?.private_key_id &&
-	cred?.private_key &&
-	cred?.client_email;
-
-// [重构] 按需获取 GCP 认证 Token (从 Edge Cache 读取凭证, 随机选择, 无本地缓存)
+// [重构] 按需获取 GCP 认证 Token (优先从 Edge Cache 读取 Token，否则生成并缓存)
+// isValidCred is now imported from replacekeys.ts
 const getGcpAuth = async (): Promise<{ token: string; projectId: string } | null> => {
 	// 1. 从 Edge Cache 读取并解析凭证
 	const creds = await getParsedGcpCredentials(); // 使用 cache.ts 的新函数
@@ -102,34 +93,56 @@ const getGcpAuth = async (): Promise<{ token: string; projectId: string } | null
 	const selectedIndex = Math.floor(Math.random() * creds.length);
 	const selectedCred = creds[selectedIndex];
 
-	// 3. 校验选择的凭证 (理论上 parseCreds 已保证有效性)
+	// 3. 校验选择的凭证
 	if (!isValidCred(selectedCred)) {
 		console.error(`getGcpAuth: Randomly selected credential at index ${selectedIndex} is invalid.`);
 		return null; // 选择的凭证无效
 	}
 
+	// 4. 构造 Token 缓存键 (使用 client_email 保证唯一性)
+	const tokenCacheKey = `${CACHE_KEYS.GCP_AUTH_TOKEN_PREFIX}${selectedCred.client_email}`;
+	const projectId = selectedCred.project_id; // 提前获取 Project ID
+
+	// 5. 尝试从 Edge Cache 获取 Token
 	try {
-		// 4. 按需创建 GoogleAuth 实例
+		const cachedToken = await getConfigValue<string>(tokenCacheKey);
+		if (cachedToken) {
+			// console.log(`[getGcpAuth] Cache Hit for token: ${tokenCacheKey}`);
+			return { token: cachedToken, projectId };
+		}
+		// console.log(`[getGcpAuth] Cache Miss for token: ${tokenCacheKey}. Fetching new token...`);
+	} catch (cacheError) {
+		console.error(`[getGcpAuth] Error reading token from cache for ${tokenCacheKey}:`, cacheError);
+		// 缓存读取失败，继续尝试获取新 Token
+	}
+
+	// 6. 缓存未命中或读取失败，获取新 Token
+	try {
 		const auth = new GoogleAuth({
 			credentials: selectedCred,
-			scopes: ["https://www.googleapis.com/auth/cloud-platform"], // 确保 Scope 正确
+			scopes: ["https://www.googleapis.com/auth/cloud-platform"],
 		});
 
-		// 5. 获取 Access Token (google-auth-library 内部会处理缓存)
-		// console.log(`getGcpAuth: Requesting token using credential index ${selectedIndex} (Project: ${selectedCred.project_id})`);
 		const newToken = await auth.getAccessToken();
 
 		if (!newToken) {
-			console.error(`getGcpAuth: Failed to get new token using credential index ${selectedIndex} (Project: ${selectedCred.project_id}). GoogleAuth returned null.`);
+			console.error(`getGcpAuth: Failed to get new token using credential index ${selectedIndex} (Project: ${projectId}). GoogleAuth returned null.`);
 			return null; // 获取 Token 失败
 		}
 
-		// 6. 返回 Token 和 Project ID
-		return { token: newToken, projectId: selectedCred.project_id };
+		// 7. 将新 Token 存入 Edge Cache (设置 TTL，例如 50 分钟)
+		const tokenTtlSeconds = 50 * 60;
+		setEdgeCacheValue(tokenCacheKey, newToken, tokenTtlSeconds).catch(cacheSetError => {
+			console.error(`[getGcpAuth] Error setting token to cache for ${tokenCacheKey}:`, cacheSetError);
+		});
+		// console.log(`[getGcpAuth] Fetched and cached new token for ${tokenCacheKey}`);
+
+		// 8. 返回新 Token 和 Project ID
+		return { token: newToken, projectId };
 
 	} catch (error) {
 		// 统一处理所有获取 Token 过程中的错误
-		console.error(`getGcpAuth: Error during token acquisition using credential index ${selectedIndex} (Project: ${selectedCred.project_id}):`, error);
+		console.error(`getGcpAuth: Error during token acquisition using credential index ${selectedIndex} (Project: ${projectId}):`, error);
 		return null; // 发生任何错误都返回 null，让外部重试机制处理
 	}
 };
@@ -144,8 +157,8 @@ const _getGeminiAuthenticationDetails = async (
 	attempt: number,
 	strategyName: string // 用于日志/错误信息
 ): Promise<AuthenticationDetails> => {
-	// 从 Edge Cache 读取 (await)
-	const apiRetryLimit = await getApiRetryLimit(); // 使用 await
+	// [修改] 从 Edge Cache 读取重试次数
+	const apiRetryLimit = await getApiRetryLimitFromCache(); // 使用 FromCache 版本
 	const userApiKey = getApiKey(c);
 
 	let keyResult: ApiKeyResult | null = null;
@@ -194,7 +207,8 @@ interface RequestHandlerStrategy {
 class VertexAIStrategy implements RequestHandlerStrategy {
 	async getAuthenticationDetails(_c: Context, _ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
 		// 从 Edge Cache 读取 (await)
-		const apiRetryLimit = await getApiRetryLimit(); // 使用 await
+		// [修改] 从 Edge Cache 读取重试次数
+		const apiRetryLimit = await getApiRetryLimitFromCache(); // 使用 FromCache 版本
 
 		// 调用重构后的 getGcpAuth (它内部处理凭证获取和 Token 请求)
 		const auth = await getGcpAuth(); // await
@@ -216,8 +230,8 @@ class VertexAIStrategy implements RequestHandlerStrategy {
 		if (!authDetails.gcpProject) {
 			throw new Error("Vertex AI 需要 GCP Project ID");
 		}
-		// 从 Edge Cache 读取 (await)
-		const gcpDefaultLocation = await getGcpDefaultLocation(); // 使用 await
+		// [修改] 从 Edge Cache 读取 GCP 位置
+		const gcpDefaultLocation = await getGcpDefaultLocationFromCache(); // 使用 FromCache 版本
 		const host = gcpDefaultLocation === "global"
 			? "aiplatform.googleapis.com"
 			: `${gcpDefaultLocation}-aiplatform.googleapis.com`;
@@ -308,8 +322,8 @@ class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 	}
 
 	async buildTargetUrl(ctx: StrategyContext, _authDetails: AuthenticationDetails): Promise<URL> {
-		// 从 Edge Cache 读取 API 映射
-		const apiMappings = await getApiMappings(); // await
+		// 从 Edge Cache 读取 API 映射 (使用缓存优先)
+		const apiMappings = await getConfigValue<Record<string, string>>(CACHE_KEYS.API_MAPPINGS) || {}; // await
 		const baseUrl = apiMappings['/gemini']; // 假设 '/gemini' 是映射中的键
 		if (!baseUrl) {
 			throw new Response("Gemini base URL ('/gemini') not found in API mappings.", { status: 503 });
@@ -431,8 +445,8 @@ class GeminiNativeStrategy implements RequestHandlerStrategy {
 			// 这个检查理论上在 _getGeminiAuthenticationDetails 中已处理，但保留以防万一
 			throw new Response("Gemini Native strategy requires an API Key, but none was provided or found.", { status: 500 });
 		}
-		// 从 Edge Cache 读取 API 映射
-		const apiMappings = await getApiMappings(); // await
+		// 从 Edge Cache 读取 API 映射 (使用缓存优先)
+		const apiMappings = await getConfigValue<Record<string, string>>(CACHE_KEYS.API_MAPPINGS) || {}; // await
 		const baseUrl = apiMappings['/gemini']; // 假设 '/gemini' 是映射中的键
 		if (!baseUrl) {
 			throw new Response("Gemini base URL ('/gemini') not found in API mappings.", { status: 503 });
@@ -495,8 +509,8 @@ class GenericProxyStrategy implements RequestHandlerStrategy {
 	}
 
 	async buildTargetUrl(ctx: StrategyContext, _authDetails: AuthenticationDetails): Promise<URL> {
-		// 从 Edge Cache 读取 API 映射
-		const apiMappings = await getApiMappings(); // await
+		// 从 Edge Cache 读取 API 映射 (使用缓存优先)
+		const apiMappings = await getConfigValue<Record<string, string>>(CACHE_KEYS.API_MAPPINGS) || {}; // await
 		if (!ctx.prefix || !apiMappings[ctx.prefix]) {
 			// 确保 ctx.prefix 存在且在映射中
 			throw new Response(`Proxy target for prefix '${ctx.prefix || '(null)'}' not configured in API mappings.`, { status: 503 });
@@ -565,8 +579,9 @@ const determineRequestType = async (
 ): Promise<DetermineResult> => {
 	const req = c.req.raw;
 	const url = new URL(req.url);
-	// 从 Edge Cache 读取 API 映射
-	const apiMappings = await getApiMappings(); // await
+	// 从 Edge Cache 读取 API 映射 (使用缓存优先)
+	// const apiMappings = await getApiMappings(); // 旧：直接读 KV
+	const apiMappings = await getConfigValue<Record<string, string>>(CACHE_KEYS.API_MAPPINGS) || {}; // 新：读缓存，若无则 KV 回退，保证返回对象
 	const pathname = url.pathname;
 
 	// 找到匹配的最长前缀
@@ -660,8 +675,7 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 			originalBodyBuffer = await clonedReqForBody.arrayBuffer();
 		} catch (e) {
 			console.error("Failed to read original request body into ArrayBuffer:", e);
-			const errorResponse = new Response("Internal Server Error: Failed to process request body.", { status: 500 });
-			return errorResponse; // 不在这里触发队列
+			return new Response("Internal Server Error: Failed to process request body.", { status: 500 });
 		}
 	}
 
@@ -671,15 +685,13 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 		determinationResult = await determineRequestType(c, originalBodyBuffer); // await
 	} catch (error) {
 		console.error("Error during request type determination:", error);
-		const errorResponse = new Response("Internal Server Error during request routing.", { status: 500 });
-		return errorResponse; // 不在这里触发队列
+		return new Response("Internal Server Error during request routing.", { status: 500 });
 	}
 
 	const { type, prefix, path, parsedBody } = determinationResult;
 
 	if (type === RequestType.UNKNOWN) {
-		const errorResponse = new Response(`No proxy route configured for path: ${url.pathname}`, { status: 404 });
-		return errorResponse; // 不在这里触发队列
+		return new Response(`No proxy route configured for path: ${url.pathname}`, { status: 404 });
 	}
 
 	const strategy = getStrategy(type);
@@ -737,16 +749,7 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 					finalResponse = await strategy.handleResponse(proxyResponse, strategyContext); // await
 				}
 				// console.log(`Attempt ${attempts}/${maxRetries}: Success for ${RequestType[type]} ${targetUrl}`);
-				// [新增] 成功响应后触发后台缓存刷新队列
-				try {
-					const kv = await ensureKv();
-					await kv.enqueue({ type: "refreshCache" });
-					console.log(`[Queue] Enqueued background cache refresh task after successful proxy for ${RequestType[type]} ${url.pathname}.`);
-				} catch (enqueueError) {
-					console.error("[Queue] Failed to enqueue background cache refresh task:", enqueueError);
-				}
-
-				return finalResponse; // <<< 返回成功响应
+				return finalResponse; // 返回成功响应
 			} else {
 				// 失败响应
 				console.warn(`Attempt ${attempts}/${maxRetries} failed for ${RequestType[type]} ${targetUrl}: ${proxyResponse.status} ${proxyResponse.statusText}`);
@@ -775,20 +778,16 @@ export const handleGenericProxy = async (c: Context): Promise<Response> => {
 				// 记录详细错误并返回 500
 				console.error("Non-Response error details:", error instanceof Error ? error.stack : error);
 				// 即使发生内部错误，也尝试返回上次捕获的 HTTP 错误（如果有的话），否则返回通用 500
-				const errorResponse = lastErrorResponse ?? new Response(`Internal Server Error during request processing: ${error instanceof Error ? error.message : String(error)}`, { status: 500 }); // 不在这里触发队列
-				return errorResponse;
+				return lastErrorResponse ?? new Response(`Internal Server Error during request processing: ${error instanceof Error ? error.message : String(error)}`, { status: 500 });
 			}
 		}
 	} // end while loop
 
 	// 5. 如果循环结束仍未成功，返回最后一次捕获的错误响应
 	if (lastErrorResponse) {
-		// 不在这里触发队列，因为请求本身失败了
 		return lastErrorResponse;
 	}
 
 	// 如果循环因某种原因结束且没有 lastErrorResponse（理论上不应发生），返回通用错误
-	const finalErrorResponse = new Response("Request processing failed after maximum retries.", { status: 502 }); // 502 Bad Gateway 可能更合适
-	// 不在这里触发队列，因为请求本身失败了
-	return finalErrorResponse;
+	return new Response("Request processing failed after maximum retries.", { status: 502 }); // 502 Bad Gateway 可能更合适
 };

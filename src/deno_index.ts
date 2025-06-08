@@ -6,9 +6,19 @@ import { serveStatic } from "hono/middleware";
 import * as kvOps from "./replacekeys.ts"; // Keep existing kvOps import for other functions
 // --- 导入新的代理处理模块 ---
 import { handleGenericProxy } from "./proxy_handler.ts";
-// --- 导入缓存和队列相关 ---
-import { loadAndCacheAllKvConfigs } from "./cache.ts";
-import { ensureKv } from "./replacekeys.ts"; // [新增] 导入 ensureKv 用于队列
+// --- 导入缓存加载函数 ---
+import { loadAndCacheAllKvConfigs } from "./cache.ts"; 
+
+// --- 定时任务：每5分钟刷新 Edge Cache ---
+Deno.cron("Edge Cache Refresh", "*/5 * * * *", async () => {
+	console.log("[Cron] Starting Edge Cache refresh...");
+	try {
+		await loadAndCacheAllKvConfigs();
+		console.log("[Cron] Edge Cache refresh finished successfully.");
+	} catch (error) {
+		console.error("[Cron] Edge Cache refresh failed:", error);
+	}
+});
 
 // --- 辅助函数 (非代理相关) (保持不变) ---
 /** 创建 JSON 错误响应 */
@@ -26,12 +36,8 @@ function createSuccessPayload(data: Record<string, any>, status: number = 200): 
 		headers: { "Content-Type": "application/json" },
 	});
 }
-
-
 // --- Hono 应用实例 ---
 const app = new Hono();
-
-// CORS - Will be applied selectively
 
 
 // --- 静态文件路由 (保持不变) ---
@@ -41,8 +47,6 @@ app.get('/manage.js', serveStatic({ path: './src/manage.js' }));
 
 
 // --- 管理 API 路由 ---
-
-// Admin auth middleware moved to manage_api.ts
 
 // 不需要密码的登录路由
 app.post('/api/manage/login', async (c) => {
@@ -77,13 +81,6 @@ app.post('/api/manage/login', async (c) => {
 // 导入并挂载管理 API 子应用 (在登录路由之后)
 import { manageApp } from "./manage_api.ts";
 app.route('/api/manage', manageApp);
-
-
-// --- 代理路由 (保持不变) ---
-// 移除基于硬编码 apiMapping 的循环路由注册
-// 添加一个通配符路由来捕获所有潜在的代理请求
-// handleGenericProxy 将在内部查询 KV 并处理路由
-// 注意：此路由应放在更具体的静态路由之后
 
 
 // --- 其他路由 (保持不变) ---
@@ -128,57 +125,8 @@ if (portFromEnv) {
 		}
 	} catch (e) { /* Ignore parse error */ }
 }
+// KV 连接将通过 ensureKv() 在首次需要时懒加载避免阻塞冷启动
 
-// --- 确保 KV 在启动时打开 ---
-// --- [移除] 移除所有启动时预加载缓存的逻辑 ---
-// 缓存将在第一个请求处理完成后通过 waitUntil 在后台填充
-
-// --- Queue Listener ---
-// [修改] 改为异步函数，并在内部确保 KV 连接
-async function startQueueListener() {
-	console.log("Starting Deno KV Queue listener initialization...");
-	try {
-		// [修改] 在监听前确保 KV 连接
-		const kv = await ensureKv();
-		console.log("KV connection ensured for queue listener.");
-
-		console.log("Starting Deno KV Queue listener for 'refreshCache' tasks...");
-		// [保持] 继续监听队列
-		kv.listenQueue(async (msg: unknown) => {
-			// 基本类型检查
-			if (typeof msg === 'object' && msg !== null && 'type' in msg && msg.type === 'refreshCache') {
-				console.log("[Queue] Received 'refreshCache' task. Processing...");
-				try {
-					await loadAndCacheAllKvConfigs();
-					console.log("[Queue] Background cache refresh task completed successfully.");
-				} catch (error) {
-					console.error("[Queue] Error executing background cache refresh task:", error);
-					// Deno Queues 应该会自动重试失败的消息
-				}
-			} else {
-				console.warn("[Queue] Received unknown message:", msg);
-				// 可以考虑将未知消息移到死信队列或其他处理
-			}
-		});
-		console.log("Deno KV Queue listener started.");
-	} catch (error) {
-		console.error("FATAL: Failed to start Deno KV Queue listener:", error);
-		// 如果监听器启动失败，可能需要阻止服务器启动
-		throw new Error("Failed to start KV Queue listener.");
-	}
-}
-
-// [修改] 异步启动队列监听器，不阻塞服务器启动
-startQueueListener(); // <--- 移除 await，让其在后台启动
-
-// 立即尝试启动服务器
-try {
-	Deno.serve({ port }, app.fetch);
-	console.log(`Server running on http://localhost:${port}`);
-} catch (error) {
-	// 这个 catch 主要捕获 Deno.serve 本身的错误，而不是 startQueueListener 的错误
-	console.error("FATAL: Failed to start Deno server:", error);
-		// Consider exiting if the queue listener is critical and failed to start
-		// Deno.exit(1);
-	}
-// Removed leftover IIFE closing
+// 启动服务器 (保持不变)
+Deno.serve({ port }, app.fetch);
+console.log(`Server running on http://localhost:${port}`);
