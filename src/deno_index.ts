@@ -1,3 +1,15 @@
+// --- 定时任务：每5分钟刷新 Edge Cache (移至顶部) ---
+Deno.cron("Edge Cache Refresh", "*/5 * * * *", async () => {
+	// 在 cron 回调内部动态导入，确保在顶层定义 cron 时不需要此依赖
+	const { loadAndCacheAllKvConfigs } = await import("./cache.ts");
+	console.log("[Cron] Starting Edge Cache refresh...");
+	try {
+		await loadAndCacheAllKvConfigs();
+		console.log("[Cron] Edge Cache refresh finished successfully.");
+	} catch (error) {
+		console.error("[Cron] Edge Cache refresh failed:", error);
+	}
+});
 // --- 导入 Hono 和相关模块 ---
 import { Hono, } from "hono";
 import { serveStatic } from "hono/middleware";
@@ -8,17 +20,6 @@ import * as kvOps from "./replacekeys.ts"; // Keep existing kvOps import for oth
 import { handleGenericProxy } from "./proxy_handler.ts";
 // --- 导入缓存加载函数 ---
 import { loadAndCacheAllKvConfigs } from "./cache.ts"; 
-
-// --- 定时任务：每5分钟刷新 Edge Cache ---
-Deno.cron("Edge Cache Refresh", "*/5 * * * *", async () => {
-	console.log("[Cron] Starting Edge Cache refresh...");
-	try {
-		await loadAndCacheAllKvConfigs();
-		console.log("[Cron] Edge Cache refresh finished successfully.");
-	} catch (error) {
-		console.error("[Cron] Edge Cache refresh failed:", error);
-	}
-});
 
 // --- 辅助函数 (非代理相关) (保持不变) ---
 /** 创建 JSON 错误响应 */
