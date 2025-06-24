@@ -302,8 +302,6 @@ export const handleProxyRequest = async (c: Context): Promise<Response> => {
 			}
             
 			lastError = proxyResponse.clone();
-            const responseBodyText = await lastError.text();
-			console.error(`Attempt ${attempts}/${maxRetries} failed for ${RequestStrategyType[route.requestType]} to ${targetUrl}: ${lastError.status}`, responseBodyText);
             await proxyResponse.body?.cancel();
 
 		} catch (error) {
