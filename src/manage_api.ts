@@ -17,12 +17,19 @@ manageApp.use('*', cors({
 }));
 
 const authMiddleware = async (c: Context, next: () => Promise<void>) => {
-    // CORRECTED: 在 Hono sub-app 中，c.req.path 是相对于挂载点 (/api/manage) 的路径。
-    // 因此，对 /api/manage/login 的请求，这里的路径是 /login。
+    // 关键修复 #1: 首先，无条件放行所有 OPTIONS 预检请求。
+    // 这是处理 CORS 复杂请求的必要步骤。
+    if (c.req.method === 'OPTIONS') {
+        return c.text("OK", 200); // 直接返回 200 OK 响应，让浏览器预检通过
+    }
+
+    // 关键修复 #2: 检查相对于挂载点的路径 /login。
+    // 只有非 OPTIONS 的 /login 请求（也就是真正的 POST 登录请求）会走到这里。
     if (c.req.path === '/login') {
 		return await next(); // 如果是登录请求，直接放行
 	}
 
+    // 对于所有其他请求，进行密码验证
 	const password = c.req.header('X-Admin-Password');
 	if (!password || !(await logic.verifyAdminPassword(password))) {
 		return c.json({ success: false, error: "Unauthorized" }, 401);
@@ -86,18 +93,13 @@ const createListEndpoints = (
     getter: () => Promise<Set<string> | string[]>,
     setter: (items: string[]) => Promise<void>
 ) => {
-    // GET /path - 获取列表
     manageApp.get(`/${path}`, (c) => handleApi(c, async () => ({ [path]: Array.from(await getter()) }), `${name} fetched.`, `Failed to fetch ${name}`));
-    
-    // POST /path - 更新整个列表
     manageApp.post(`/${path}`, async (c) => {
         const body = await c.req.json().catch(() => null);
         const items = body?.[path];
         if (!Array.isArray(items) || !items.every(i => typeof i === 'string')) return c.json({ error: `Invalid input: ${path} must be an array of strings.` }, 400);
         return handleApi(c, () => setter(items), `${name} list updated.`, `Failed to update ${name} list`);
     });
-
-    // ADDED: DELETE /path/all - 清空列表 (对应前端的 "Clear All" 按钮)
     manageApp.delete(`/${path}/all`, (c) => handleApi(c, () => setter([]), `All ${name} cleared.`, `Failed to clear ${name}`));
 };
 
