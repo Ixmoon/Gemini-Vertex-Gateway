@@ -146,7 +146,7 @@ class VertexAIStrategy implements RequestHandlerStrategy {
 }
 
 class GeminiOpenAIStrategy implements RequestHandlerStrategy {
-	async getAuthDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthDetails> {
+	getAuthDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthDetails> {
 		const modelName = ctx.parsedBody?.model ?? null;
 		return Promise.resolve(resolveGeminiAuthDetails(c, modelName, attempt, "Gemini OpenAI-Compat"));
 	}
@@ -180,7 +180,7 @@ class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 }
 
 class GeminiNativeStrategy implements RequestHandlerStrategy {
-	async getAuthDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthDetails> {
+	getAuthDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthDetails> {
 		const modelName = ctx.downstreamPath.match(/\/models\/([^:]+):/)?.[1] ?? null;
 		return Promise.resolve(resolveGeminiAuthDetails(c, modelName, attempt, "Gemini Native"));
 	}
@@ -201,7 +201,7 @@ class GeminiNativeStrategy implements RequestHandlerStrategy {
 }
 
 class GenericProxyStrategy implements RequestHandlerStrategy {
-	async getAuthDetails(): Promise<AuthDetails> {
+	getAuthDetails(): Promise<AuthDetails> {
 		return Promise.resolve({ key: null, source: null, gcpToken: null, gcpProject: null, maxRetries: 1 });
 	}
 	buildTargetUrl(ctx: StrategyContext, _auth: AuthDetails): URL {
