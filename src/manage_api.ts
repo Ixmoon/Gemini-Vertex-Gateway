@@ -16,17 +16,20 @@ manageApp.use('*', cors({
 }));
 
 const authMiddleware = async (c: Context, next: () => Promise<void>) => {
-    // 登录路由本身不需要认证
-	if (c.req.path === '/login') {
-		return await next();
+    // ############ FIX IS HERE ############
+    // 检查完整的请求路径，而不是相对路径
+    if (c.req.path === '/api/manage/login') {
+		return await next(); // 如果是登录请求，直接放行
 	}
+    // #####################################
+
 	const password = c.req.header('X-Admin-Password');
 	if (!password || !(await logic.verifyAdminPassword(password))) {
-		return c.json({ error: "Unauthorized" }, 401);
+		return c.json({ success: false, error: "Unauthorized" }, 401);
 	}
 	await next();
 };
-// Apply middleware to all routes except /login
+// 应用中间件
 manageApp.use('*', authMiddleware);
 
 
@@ -40,7 +43,6 @@ const handleApi = async <T>(
     try {
         const result = await handler();
         const message = typeof successMessage === 'function' ? successMessage(result) : successMessage;
-        // Ensure result is always wrapped in an object for consistent responses
         const payloadData = (result !== null && typeof result === 'object' && !Array.isArray(result)) ? result : { data: result };
         return c.json({ success: true, message, ...payloadData }, 200);
     } catch (e) {
@@ -78,13 +80,13 @@ manageApp.post('/login', async (c) => {
 });
 
 // --- List-based configs (Trigger Keys, Pool Keys, Fallback Models) ---
-// This generic handler creates all necessary endpoints for a list-based configuration
 const createListEndpoints = (
     path: string,
     name: string,
     getter: () => Promise<Set<string> | string[]>,
     setter: (items: string[]) => Promise<void>
 ) => {
+    // 注意：这里的路径是相对路径，例如 '/trigger-keys'
     manageApp.get(`/${path}`, (c) => handleApi(c, async () => ({ [path]: Array.from(await getter()) }), `${name} fetched.`, `Failed to fetch ${name}`));
     manageApp.post(`/${path}`, async (c) => {
         const body = await c.req.json().catch(() => null);
@@ -102,7 +104,7 @@ createListEndpoints('fallback-models', 'Fallback Models', logic.getFallbackModel
 // 指定密钥 (Fallback Key)
 manageApp.get('/fallback-key', (c) => handleApi(c, async () => ({ key: await logic.getFallbackKey() }), "Fallback key fetched.", "Failed to fetch fallback key"));
 manageApp.post('/fallback-key', async (c) => {
-	const { key } = await c.req.json().catch(() => ({ key: undefined })); // key can be null or empty string to clear
+	const { key } = await c.req.json().catch(() => ({ key: undefined }));
     if (key !== undefined && key !== null && typeof key !== 'string') return c.json({ error: "Invalid key provided, must be a string or null." }, 400);
 	return handleApi(c, () => logic.setFallbackKey(key), "Fallback key updated.", "Failed to update fallback key");
 });
@@ -140,7 +142,7 @@ manageApp.post('/api-mappings', async (c) => {
     if (typeof mappings !== 'object' || mappings === null || Array.isArray(mappings)) {
         return c.json({ error: "Invalid mappings: must be an object." }, 400);
     }
-	if (mappings['/gemini'] || mappings['/vertex']) { // Reserved paths
+	if (mappings['/gemini'] || mappings['/vertex']) {
 		return c.json({ error: "Cannot override reserved paths: /gemini, /vertex" }, 400);
 	}
     for (const prefix in mappings) {
