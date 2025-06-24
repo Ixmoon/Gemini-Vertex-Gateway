@@ -3,44 +3,22 @@ import { GoogleAuth } from "google-auth-library";
 
 // =================================================================================
 // --- 1. 配置模块 (从环境变量读取) ---
-// 本模块负责从环境变量中读取所有应用配置。
 // =================================================================================
 
-/**
- * [配置] 从环境变量解析以逗号分隔的字符串为 Set<string>。
- * @param varName - 环境变量的名称。
- * @returns - 解析后的 Set 集合。
- */
 const getSetFromEnv = (varName: string): Set<string> => {
-	const value = Deno.env.get(varName);
-	return value ? new Set(value.split(',').map(s => s.trim()).filter(Boolean)) : new Set();
+	const val = Deno.env.get(varName);
+	return val ? new Set(val.split(',').map(s => s.trim()).filter(Boolean)) : new Set();
 };
-
-/** [配置] 获取触发密钥集合。环境变量: `TRIGGER_KEYS` (例如: "key-abc,key-def") */
 const getTriggerKeys = (): Set<string> => getSetFromEnv("TRIGGER_KEYS");
-
-/** [配置] 获取主密钥池数组。环境变量: `POOL_KEYS` (例如: "pool-key-1,pool-key-2") */
 const getPoolKeys = (): string[] => Array.from(getSetFromEnv("POOL_KEYS"));
-
-/** [配置] 获取指定的后备密钥。环境变量: `FALLBACK_KEY` */
 const getFallbackKey = (): string | null => Deno.env.get("FALLBACK_KEY") || null;
-
-/** [配置] 获取触发后备密钥的模型名称集合。环境变量: `FALLBACK_MODELS` (例如: "model-a,model-b") */
 const getFallbackModels = (): Set<string> => getSetFromEnv("FALLBACK_MODELS");
-
-/** [配置] 获取 API 请求失败时的重试次数。环境变量: `API_RETRY_LIMIT` (例如: "3") */
 const getApiRetryLimit = (): number => {
 	const limit = parseInt(Deno.env.get("API_RETRY_LIMIT") || "1", 10);
 	return isNaN(limit) || limit < 1 ? 1 : limit;
 };
-
-/** [配置] 获取 GCP 服务账号凭证 JSON 字符串。环境变量: `GCP_CREDENTIALS` */
 const getGcpCredentialsString = (): string | null => Deno.env.get("GCP_CREDENTIALS") || null;
-
-/** [配置] 获取 GCP 默认的区域 (Location)。环境变量: `GCP_DEFAULT_LOCATION` */
 const getGcpDefaultLocation = (): string => Deno.env.get("GCP_DEFAULT_LOCATION") || "global";
-
-/** [配置] 解析 API 路径映射。环境变量: `API_MAPPINGS` (格式: "/prefix1:https://target1,/prefix2:https://target2") */
 const getApiMappings = (): Record<string, string> => {
 	const mappings: Record<string, string> = {};
 	const raw = Deno.env.get("API_MAPPINGS");
@@ -62,156 +40,85 @@ const getApiMappings = (): Record<string, string> => {
 
 // =================================================================================
 // --- 2. 类型定义与常量 ---
-// 定义了整个代理逻辑中使用的核心类型和枚举。
 // =================================================================================
 
-/** GCP 凭证类型定义 */
-interface GcpCredentials {
-	type: string;
-	project_id: string;
-	private_key_id: string;
-	private_key: string;
-	client_email: string;
-	client_id?: string;
-}
-
-/** API 密钥的来源类型 */
+interface GcpCredentials { type: string; project_id: string; private_key_id: string; private_key: string; client_email: string; client_id?: string; }
 type ApiKeySource = 'user' | 'fallback' | 'pool';
-/** API 密钥的解析结果 */
 type ApiKeyResult = { key: string; source: ApiKeySource };
-
-/** 请求处理类型枚举 */
-enum RequestType {
-	VERTEX_AI,
-	GEMINI_OPENAI,
-	GEMINI_NATIVE,
-	GENERIC_PROXY,
-	UNKNOWN
-}
-
-/** 认证详情 (由策略返回) */
-interface AuthenticationDetails {
-	key: string | null;
-	source: ApiKeySource | null;
-	gcpToken: string | null;
-	gcpProject: string | null;
-	maxRetries: number;
-}
-
-/** 传递给策略的上下文信息 */
-interface StrategyContext {
-	originalUrl: URL;
-	originalRequest: Request;
-	path: string;
-	prefix: string | null;
-	parsedBody?: any | null;
-	originalBodyBuffer?: ArrayBuffer | null;
-}
+enum RequestType { VERTEX_AI, GEMINI_OPENAI, GEMINI_NATIVE, GENERIC_PROXY, UNKNOWN }
+interface AuthenticationDetails { key: string | null; source: ApiKeySource | null; gcpToken: string | null; gcpProject: string | null; maxRetries: number; }
+interface StrategyContext { originalUrl: URL; originalRequest: Request; path: string; prefix: string | null; parsedBody?: any | null; originalBodyBuffer?: ArrayBuffer | null; }
 
 // =================================================================================
 // --- 3. 核心 API 密钥选择与 GCP 认证逻辑 ---
-// 此部分负责决定使用哪个API密钥，并处理GCP的身份验证。
 // =================================================================================
 
-/** [核心] 获取请求应使用的 API 密钥。 */
-const getApiKeyForRequest = (userProvidedKey: string | null, modelName: string | null): ApiKeyResult | null => {
-	if (!userProvidedKey) return null;
-	if (!getTriggerKeys().has(userProvidedKey)) {
-		return { key: userProvidedKey, source: 'user' };
+const getApiKeyForRequest = (userKey: string | null, model: string | null): ApiKeyResult | null => {
+	if (!userKey) return null;
+	if (!getTriggerKeys().has(userKey)) return { key: userKey, source: 'user' };
+	if (model && getFallbackModels().has(model.trim())) {
+		const fbKey = getFallbackKey();
+		if (fbKey) return { key: fbKey, source: 'fallback' };
 	}
-
-	if (modelName && getFallbackModels().has(modelName.trim())) {
-		const fallbackKey = getFallbackKey();
-		if (fallbackKey) return { key: fallbackKey, source: 'fallback' };
-	}
-
-	const poolKeys = getPoolKeys();
-	if (poolKeys.length > 0) {
-		return { key: poolKeys[Math.floor(Math.random() * poolKeys.length)], source: 'pool' };
-	}
-
-	console.warn("Trigger key used, but no fallback/pool key is available.");
+	const pool = getPoolKeys();
+	if (pool.length > 0) return { key: pool[Math.floor(Math.random() * pool.length)], source: 'pool' };
 	return null;
 };
 
-/** 检查 GCP 凭证对象是否有效 */
 const isValidGcpCred = (cred: any): cred is GcpCredentials =>
 	cred?.type === 'service_account' && cred?.project_id && cred?.private_key && cred?.client_email;
 
-/** [核心] 获取 GCP 认证 Token。 */
 const getGcpAuth = async (): Promise<{ token: string; projectId: string } | null> => {
 	const credsStr = getGcpCredentialsString();
 	if (!credsStr) return null;
-
 	let creds: GcpCredentials[] = [];
 	try {
 		const parsed = JSON.parse(credsStr);
 		creds = (Array.isArray(parsed) ? parsed : [parsed]).filter(isValidGcpCred);
-	} catch (e) {
-		console.error("[GCP] Failed to parse GCP_CREDENTIALS:", e);
-	}
-
-	if (creds.length === 0) {
-		console.warn("[GCP] No valid credentials found in GCP_CREDENTIALS.");
-		return null;
-	}
-
-	const selectedCred = creds[Math.floor(Math.random() * creds.length)];
+	} catch (e) { console.error("[GCP] Failed to parse GCP_CREDENTIALS:", e); }
+	if (creds.length === 0) return null;
+	const selected = creds[Math.floor(Math.random() * creds.length)];
 	try {
-		const auth = new GoogleAuth({ credentials: selectedCred, scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
+		const auth = new GoogleAuth({ credentials: selected, scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
 		const token = await auth.getAccessToken();
 		if (!token) {
-			console.error(`[GCP] Failed to get Access Token for project: ${selectedCred.project_id}`);
+			console.error(`[GCP] Failed to get Access Token for project: ${selected.project_id}`);
 			return null;
 		}
-		return { token, projectId: selectedCred.project_id };
+		return { token, projectId: selected.project_id };
 	} catch (error) {
-		console.error(`[GCP] Error during token acquisition for project ${selectedCred.project_id}:`, error);
+		console.error(`[GCP] Error during token acquisition for project ${selected.project_id}:`, error);
 		return null;
 	}
 };
 
 // =================================================================================
 // --- 4. 请求处理策略 (Strategy Pattern) ---
-// 根据不同的请求类型，定义了不同的处理策略。
 // =================================================================================
 
-/** 从请求中提取 API 密钥 */
 const getApiKeyFromReq = (c: Context): string | null => {
 	const url = new URL(c.req.url);
 	return url.searchParams.get('key') || c.req.header("Authorization")?.replace(/^bearer\s+/i, '') || c.req.header("x-goog-api-key") || null;
 };
-
-/** 构建基础代理 Headers (过滤掉 host) */
 const buildBaseProxyHeaders = (h: Headers): Headers => { const n = new Headers(h); n.delete('host'); return n; };
 
-/** Gemini 策略获取认证详情的公共逻辑 */
 const _getGeminiAuthDetails = (c: Context, model: string | null, attempt: number, name: string): AuthenticationDetails => {
 	const userApiKey = getApiKeyFromReq(c);
 	const isModels = new URL(c.req.url).pathname.endsWith('/models');
 	let result: ApiKeyResult | null = null;
-
 	if (attempt === 1) {
 		result = getApiKeyForRequest(userApiKey, model);
 		if (!result && !isModels) throw new Response(`No valid API key (${name})`, { status: 401 });
 	} else if (userApiKey && getTriggerKeys().has(userApiKey)) {
-		const poolKeys = getPoolKeys();
-		if (poolKeys.length > 0) {
-			result = { key: poolKeys[Math.floor(Math.random() * poolKeys.length)], source: 'pool' };
-		} else if (!isModels) {
-			throw new Response(`Key pool exhausted (${name})`, { status: 503 });
-		}
+		const pool = getPoolKeys();
+		if (pool.length > 0) result = { key: pool[Math.floor(Math.random() * pool.length)], source: 'pool' };
+		else if (!isModels) throw new Response(`Key pool exhausted (${name})`, { status: 503 });
 	} else if (attempt > 1 && !isModels) {
 		throw new Response(`Request failed, non-trigger key won't be retried (${name})`, { status: 503 });
 	}
-
-	return {
-		key: result?.key || null, source: result?.source || null, gcpToken: null, gcpProject: null,
-		maxRetries: result?.source === 'pool' ? getApiRetryLimit() : 1
-	};
+	return { key: result?.key || null, source: result?.source || null, gcpToken: null, gcpProject: null, maxRetries: result?.source === 'pool' ? getApiRetryLimit() : 1 };
 };
 
-/** 请求处理策略接口 */
 interface RequestHandlerStrategy {
 	getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> | AuthenticationDetails;
 	buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL | Promise<URL>;
@@ -220,10 +127,11 @@ interface RequestHandlerStrategy {
 	handleResponse?(res: Response, ctx: StrategyContext): Promise<Response>;
 }
 
-/** Vertex AI 策略 - 专用于处理 /vertex 路径的请求 */
+/**
+ * [已修正] Vertex AI 策略 - 完全恢复原始代码的请求体处理逻辑
+ */
 class VertexAIStrategy implements RequestHandlerStrategy {
 	async getAuthenticationDetails(c: Context, _ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
-		// 验证触发密钥，这是 /vertex 路径的特定要求
 		if (!getTriggerKeys().has(getApiKeyFromReq(c) || '')) {
 			throw new Response("Forbidden: A valid trigger key is required for the /vertex endpoint.", { status: 403 });
 		}
@@ -252,23 +160,42 @@ class VertexAIStrategy implements RequestHandlerStrategy {
 		headers.set('Authorization', `Bearer ${auth.gcpToken}`);
 		return headers;
 	}
-
+	
 	async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null> {
-		if (ctx.originalRequest.method === 'GET' || !ctx.originalBodyBuffer) {
-			// [FIX] Ensure null is returned instead of undefined.
-			return ctx.originalBodyBuffer ?? null;
+		// 如果是 GET 或 HEAD 请求，则没有请求体
+		if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD') {
+			return null;
 		}
+
+		// 如果没有预读的请求体 buffer，也返回 null
+		if (!ctx.originalBodyBuffer) {
+			console.warn("Vertex: No body buffer found for non-GET/HEAD request.");
+			return null;
+		}
+
 		try {
+			// 解析请求体
 			const bodyToModify = JSON.parse(new TextDecoder().decode(ctx.originalBodyBuffer));
+
+			// 检查解析结果是否为对象
 			if (typeof bodyToModify !== 'object' || bodyToModify === null) {
+				console.warn("Vertex: Parsed body is not an object, cannot apply modifications.");
 				return JSON.stringify(bodyToModify);
 			}
+
+			// --- 执行关键的请求体修改 ---
+
+			// 1. 为模型名称添加 'google/' 前缀
 			if (bodyToModify.model && typeof bodyToModify.model === 'string' && !bodyToModify.model.startsWith('google/')) {
 				bodyToModify.model = `google/${bodyToModify.model}`;
 			}
+
+			// 2. 如果 reasoning_effort 为 'none'，则删除该字段
 			if (bodyToModify.reasoning_effort === 'none') {
 				delete bodyToModify.reasoning_effort;
 			}
+
+			// 3. 注入必需的 'google.safety_settings' 块
 			bodyToModify.google = {
 				...(bodyToModify.google || {}),
 				safety_settings: [
@@ -278,47 +205,38 @@ class VertexAIStrategy implements RequestHandlerStrategy {
 					{ "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF" },
 				]
 			};
+
+			// 返回修改后的、序列化为 JSON 字符串的请求体
 			return JSON.stringify(bodyToModify);
+
 		} catch (e) {
-			console.error("Vertex body modification error:", e);
-			// [FIX] Ensure null is returned instead of undefined.
-			return ctx.originalBodyBuffer ?? null;
+			console.error("Vertex: Failed to parse and modify request body:", e);
+			// 如果解析或修改失败，抛出一个标准的 400 错误响应
+			throw new Response("Failed to parse or modify request body for Vertex AI. Invalid JSON.", { status: 400 });
 		}
 	}
 }
 
-/** Gemini (OpenAI 兼容) 策略 */
-class GeminiOpenAIStrategy implements RequestHandlerStrategy {
-	getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number) {
-		return _getGeminiAuthDetails(c, (ctx.parsedBody as any)?.model, attempt, "Gemini OpenAI");
-	}
 
+class GeminiOpenAIStrategy implements RequestHandlerStrategy {
+	getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number) { return _getGeminiAuthDetails(c, (ctx.parsedBody as any)?.model, attempt, "Gemini OpenAI"); }
 	buildTargetUrl(ctx: StrategyContext): URL {
 		const baseUrl = getApiMappings()['/gemini'];
 		if (!baseUrl) throw new Response("Gemini base URL for '/gemini' not in API_MAPPINGS.", { status: 503 });
 		let path = ctx.path;
-        if (['/chat/completions', '/embeddings', '/models'].includes(ctx.path)) {
-            path = '/v1beta' + ctx.path;
-        } else if (ctx.path.startsWith('/v1/')) {
-            path = '/v1beta' + ctx.path.slice(3);
-        }
+		if (['/chat/completions', '/embeddings', '/models'].includes(ctx.path)) path = '/v1beta' + ctx.path;
+		else if (ctx.path.startsWith('/v1/')) path = '/v1beta' + ctx.path.slice(3);
 		const url = new URL(path, baseUrl);
 		ctx.originalUrl.searchParams.forEach((v, k) => k.toLowerCase() !== 'key' && url.searchParams.set(k, v));
 		return url;
 	}
-
 	buildRequestHeaders(ctx: StrategyContext, auth: AuthenticationDetails): Headers {
 		const headers = buildBaseProxyHeaders(ctx.originalRequest.headers);
 		headers.delete('authorization'); headers.delete('x-goog-api-key');
 		if (auth.key) headers.set('Authorization', `Bearer ${auth.key}`);
 		return headers;
 	}
-
-	processRequestBody(ctx: StrategyContext) {
-		// [FIX] Ensure null is returned instead of undefined.
-		return ctx.originalBodyBuffer ?? null;
-	}
-
+	processRequestBody(ctx: StrategyContext) { return ctx.originalBodyBuffer ?? null; }
 	async handleResponse(res: Response, ctx: StrategyContext): Promise<Response> {
 		if (!ctx.path.endsWith('/models') || !res.headers.get("content-type")?.includes("json")) return res;
 		try {
@@ -331,24 +249,13 @@ class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 				h.set('Content-Length', String(new TextEncoder().encode(newBody).byteLength));
 				return new Response(newBody, { status: res.status, statusText: res.statusText, headers: h });
 			}
-			// Fallback for cases where body might not have 'data' but is still valid JSON
 			return new Response(JSON.stringify(body), { status: res.status, statusText: res.statusText, headers: res.headers });
-		} catch (e) {
-			console.error("Gemini models fix error:", e);
-			// If JSON parsing fails, return the original response to avoid crashing
-			return res;
-		}
+		} catch { return res; }
 	}
 }
 
-/** Gemini (原生) 策略 */
 class GeminiNativeStrategy implements RequestHandlerStrategy {
-	getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number) {
-		// [FIX] Ensure null is passed instead of undefined.
-		const modelName = ctx.path.match(/\/models\/([^:]+):/)?.[1] ?? null;
-		return _getGeminiAuthDetails(c, modelName, attempt, "Gemini Native");
-	}
-
+	getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number) { const model = ctx.path.match(/\/models\/([^:]+):/)?.[1] ?? null; return _getGeminiAuthDetails(c, model, attempt, "Gemini Native"); }
 	buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
 		if (!auth.key) throw new Response("Gemini Native requires an API Key.", { status: 500 });
 		const baseUrl = getApiMappings()['/gemini'];
@@ -358,67 +265,42 @@ class GeminiNativeStrategy implements RequestHandlerStrategy {
 		url.searchParams.set('key', auth.key);
 		return url;
 	}
-
-	buildRequestHeaders(ctx: StrategyContext, _auth: AuthenticationDetails) {
-		const headers = buildBaseProxyHeaders(ctx.originalRequest.headers);
-		headers.delete('authorization'); headers.delete('x-goog-api-key');
-		return headers;
-	}
-
-	processRequestBody(ctx: StrategyContext) {
-		// [FIX] Ensure null is returned instead of undefined.
-		return ctx.originalBodyBuffer ?? null;
-	}
+	buildRequestHeaders(ctx: StrategyContext, _auth: AuthenticationDetails) { const h = buildBaseProxyHeaders(ctx.originalRequest.headers); h.delete('authorization'); h.delete('x-goog-api-key'); return h; }
+	processRequestBody(ctx: StrategyContext) { return ctx.originalBodyBuffer ?? null; }
 }
 
-/** 通用代理策略 */
 class GenericProxyStrategy implements RequestHandlerStrategy {
 	getAuthenticationDetails() { return { key: null, source: null, gcpToken: null, gcpProject: null, maxRetries: 1 }; }
 	buildTargetUrl(ctx: StrategyContext): URL {
-		if (!ctx.prefix || !getApiMappings()[ctx.prefix]) {
-			throw new Response(`Proxy target for prefix '${ctx.prefix}' not in API_MAPPINGS.`, { status: 503 });
-		}
+		if (!ctx.prefix || !getApiMappings()[ctx.prefix]) throw new Response(`Proxy target for prefix '${ctx.prefix}' not in API_MAPPINGS.`, { status: 503 });
 		const url = new URL(ctx.path, getApiMappings()[ctx.prefix]);
 		ctx.originalUrl.searchParams.forEach((v, k) => url.searchParams.set(k, v));
 		return url;
 	}
 	buildRequestHeaders(ctx: StrategyContext, _auth: AuthenticationDetails) { return buildBaseProxyHeaders(ctx.originalRequest.headers); }
-	processRequestBody(ctx: StrategyContext) {
-		// [FIX] Ensure null is returned instead of undefined.
-		return ctx.originalBodyBuffer ?? null;
-	}
+	processRequestBody(ctx: StrategyContext) { return ctx.originalBodyBuffer ?? null; }
 }
 
 // =================================================================================
 // --- 5. 策略选择器与主处理函数 ---
-// 决定请求的类型，并调用相应策略执行代理。
 // =================================================================================
 
-/** [核心] 根据请求确定其类型和应使用的策略。 */
 const determineRequestType = (req: Request, body: ArrayBuffer | null): { type: RequestType, prefix: string | null, path: string, parsedBody?: any } => {
 	const { pathname } = new URL(req.url);
+	if (pathname.startsWith('/vertex/')) return { type: RequestType.VERTEX_AI, prefix: '/vertex', path: pathname.slice('/vertex'.length) };
 	const mappings = getApiMappings();
-
-	if (pathname.startsWith('/vertex/')) {
-		return { type: RequestType.VERTEX_AI, prefix: '/vertex', path: pathname.slice('/vertex'.length) };
-	}
-
 	const prefix = Object.keys(mappings).filter(p => pathname.startsWith(p)).sort((a, b) => b.length - a.length)[0] || null;
 	const path = prefix ? pathname.slice(prefix.length) : pathname;
-
 	if (!prefix) return { type: RequestType.UNKNOWN, prefix: null, path };
 	if (prefix !== '/gemini') return { type: RequestType.GENERIC_PROXY, prefix, path };
-
 	if (!path.startsWith('/v1beta/')) {
 		let parsedBody: any = null;
-		if (body && req.method !== 'GET') try { parsedBody = JSON.parse(new TextDecoder().decode(body)); } catch {}
+		if (body && req.method !== 'GET') try { parsedBody = JSON.parse(new TextDecoder().decode(body)); } catch { /* ignore */ }
 		return { type: RequestType.GEMINI_OPENAI, prefix, path, parsedBody };
 	}
-
 	return { type: RequestType.GEMINI_NATIVE, prefix, path };
 };
 
-/** 根据请求类型获取对应的策略实例 */
 const getStrategy = (type: RequestType): RequestHandlerStrategy => {
 	switch (type) {
 		case RequestType.VERTEX_AI: return new VertexAIStrategy();
@@ -429,50 +311,36 @@ const getStrategy = (type: RequestType): RequestHandlerStrategy => {
 	}
 };
 
-/** [主处理函数] 代理所有请求。 */
 const handleGenericProxy = async (c: Context): Promise<Response> => {
-	const req = c.req.raw;
-	const bodyBuffer = (req.method !== 'GET' && req.body) ? await req.clone().arrayBuffer() : null;
-
+    const req = c.req.raw;
+	const bodyBuffer = (req.method !== 'GET' && req.method !== 'HEAD' && req.body) ? await req.clone().arrayBuffer() : null;
 	const { type, ...details } = determineRequestType(req, bodyBuffer);
 	if (type === RequestType.UNKNOWN) return c.json({ error: `No route for path: ${new URL(req.url).pathname}` }, 404);
-
 	const strategy = getStrategy(type);
-	const context: StrategyContext = {
-		originalUrl: new URL(req.url), originalRequest: req, originalBodyBuffer: bodyBuffer, ...details
-	};
-
-	let attempts = 0, maxRetries = 1;
-	let lastError: Response | null = null;
-
+	const context: StrategyContext = { originalUrl: new URL(req.url), originalRequest: req, originalBodyBuffer: bodyBuffer, ...details };
+	let attempts = 0, maxRetries = 1, lastError: Response | null = null;
 	while (attempts < maxRetries) {
 		attempts++;
 		try {
 			const auth = await Promise.resolve(strategy.getAuthenticationDetails(c, context, attempts));
 			if (attempts === 1) maxRetries = auth.maxRetries;
-
 			const targetUrl = await Promise.resolve(strategy.buildTargetUrl(context, auth));
 			const targetHeaders = strategy.buildRequestHeaders(context, auth);
 			const targetBody = await Promise.resolve(strategy.processRequestBody(context));
-
 			const res = await fetch(targetUrl, { method: req.method, headers: targetHeaders, body: targetBody });
 			if (!res.ok) {
-				lastError = res.clone();
-				await res.body?.cancel();
-				if(attempts >= maxRetries) break;
-				continue;
+				lastError = res.clone(); await res.body?.cancel();
+				if (attempts >= maxRetries) break; else continue;
 			}
 			return strategy.handleResponse ? await strategy.handleResponse(res, context) : res;
-
 		} catch (error) {
 			if (error instanceof Response) {
-				lastError = error.clone();
-				await error.body?.cancel();
-				if(attempts >= maxRetries) break;
-				continue;
+				lastError = error.clone(); await error.body?.cancel();
+				if (attempts >= maxRetries) break; else continue;
+			} else {
+				console.error(`Attempt ${attempts} error for ${RequestType[type]}:`, error);
+				return c.json({ error: `Internal Server Error: ${error instanceof Error ? error.message : "Unknown"}` }, 500);
 			}
-			console.error(`Attempt ${attempts} error for ${RequestType[type]}:`, error);
-			return c.json({ error: `Internal Server Error: ${error instanceof Error ? error.message : "Unknown"}` }, 500);
 		}
 	}
 	return lastError ?? c.json({ error: "Request failed after all retries." }, 502);
@@ -483,20 +351,13 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
 // =================================================================================
 
 const app = new Hono();
-
 app.get('/', (c: Context) => c.text('LLM Gateway Service is running.'));
 app.get('/robots.txt', (c: Context) => c.text('User-agent: *\nDisallow: /'));
 app.all('/*', handleGenericProxy);
 app.onError((err: Error, c: Context) => {
 	console.error(`Global Error Handler:`, err);
-	// Handle cases where the error is a Response object (thrown from strategies)
-	if (err instanceof Response) {
-		return err;
-	}
+	if (err instanceof Response) return err;
 	return c.json({ error: `Internal Error: ${err.message}` }, 500);
 });
-
 Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8080", 10) }, app.fetch);
-
 console.log(`Server running on http://localhost:${Deno.env.get("PORT") || "8080"}`);
-console.log("Configuration loaded from environment variables.");
