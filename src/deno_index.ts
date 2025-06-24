@@ -71,40 +71,24 @@ const isValidGcpCred = (cred: any): cred is GcpCredentials =>
 
 const getGcpAuth = async (): Promise<{ token: string; projectId: string } | null> => {
 	const credsStr = getGcpCredentialsString();
-	if (!credsStr) {
-		// [新增调试日志]
-		console.error("[DEBUG] getGcpAuth: GCP_CREDENTIALS environment variable is not set or empty.");
-		return null;
-	}
-
+	if (!credsStr) return null;
 	let creds: GcpCredentials[] = [];
 	try {
 		const parsed = JSON.parse(credsStr);
 		creds = (Array.isArray(parsed) ? parsed : [parsed]).filter(isValidGcpCred);
-	} catch (e) {
-		console.error("[DEBUG] getGcpAuth: Failed to parse GCP_CREDENTIALS as JSON:", e);
-		return null;
-	}
-
-	if (creds.length === 0) {
-		// [新增调试日志]
-		console.error("[DEBUG] getGcpAuth: GCP_CREDENTIALS parsed, but no valid service account objects were found.");
-		return null;
-	}
-	
+	} catch (e) { console.error("[GCP] Failed to parse GCP_CREDENTIALS:", e); }
+	if (creds.length === 0) return null;
 	const selected = creds[Math.floor(Math.random() * creds.length)];
-	console.log(`[DEBUG] getGcpAuth: Attempting to get token for project: ${selected.project_id} using client_email: ${selected.client_email}`);
 	try {
 		const auth = new GoogleAuth({ credentials: selected, scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
 		const token = await auth.getAccessToken();
 		if (!token) {
-			console.error(`[DEBUG] getGcpAuth: Failed to get Access Token for project: ${selected.project_id}. GoogleAuth returned null.`);
+			console.error(`[GCP] Failed to get Access Token for project: ${selected.project_id}`);
 			return null;
 		}
-		console.log(`[DEBUG] getGcpAuth: Successfully obtained access token for project: ${selected.project_id}`);
 		return { token, projectId: selected.project_id };
 	} catch (error) {
-		console.error(`[DEBUG] getGcpAuth: Error during token acquisition for project ${selected.project_id}:`, error);
+		console.error(`[GCP] Error during token acquisition for project ${selected.project_id}:`, error);
 		return null;
 	}
 };
@@ -146,26 +130,14 @@ interface RequestHandlerStrategy {
 
 class VertexAIStrategy implements RequestHandlerStrategy {
 	async getAuthenticationDetails(c: Context, _ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
-		// [核心调试点] 无论如何，先打印日志
 		const userKey = getApiKeyFromReq(c) || 'N/A';
-		console.log(`[DEBUG] Entered VertexAIStrategy.getAuthenticationDetails. Attempt: ${attempt}. User Key: ${userKey.slice(0,4)}...`);
-
 		if (!getTriggerKeys().has(userKey)) {
-			// [新增调试日志]
-			console.error(`[DEBUG] VertexAIStrategy: Access FORBIDDEN. User key "${userKey.slice(0,4)}..." is NOT in the TRIGGER_KEYS set.`);
 			throw new Response("Forbidden: A valid trigger key is required for the /vertex endpoint.", { status: 403 });
 		}
-		
-		console.log(`[DEBUG] VertexAIStrategy: User key is a valid trigger key. Proceeding to get GCP Auth.`);
 		const auth = await getGcpAuth();
-
 		if (!auth && attempt === 1) {
-			// [新增调试日志]
-			console.error("[DEBUG] VertexAIStrategy: GCP authentication failed on first attempt. Check GCP_CREDENTIALS env var and logs from getGcpAuth.");
 			throw new Response("GCP authentication failed on first attempt. Check GCP_CREDENTIALS.", { status: 503 });
 		}
-		
-		console.log(`[DEBUG] VertexAIStrategy: getAuthenticationDetails successful. GCP Project: ${auth?.projectId}`);
 		return { key: null, source: null, gcpToken: auth?.token || null, gcpProject: auth?.projectId || null, maxRetries: getApiRetryLimit() };
 	}
 
@@ -174,11 +146,14 @@ class VertexAIStrategy implements RequestHandlerStrategy {
 		const loc = getGcpDefaultLocation();
 		const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
 		const baseUrl = `https://${host}/v1beta1/projects/${auth.gcpProject}/locations/${loc}/endpoints/openapi`;
-		const path = ctx.path.startsWith('/v1/') ? ctx.path.slice(3) : ctx.path;
-		const url = new URL(`${baseUrl}${path}`);
+		
+		let targetPath = ctx.path;
+		if (targetPath.startsWith('/v1/')) {
+			targetPath = targetPath.slice(3); // Removes "/v1" leaving "/chat/completions"
+		}
+		
+		const url = new URL(`${baseUrl}${targetPath}`);
 		ctx.originalUrl.searchParams.forEach((v, k) => k.toLowerCase() !== 'key' && url.searchParams.set(k, v));
-		// [新增调试日志]
-		console.log(`[DEBUG] VertexAIStrategy: Built target URL: ${url.toString()}`);
 		return url;
 	}
 
@@ -222,8 +197,6 @@ class VertexAIStrategy implements RequestHandlerStrategy {
 				{ "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF" },
 			]
 		};
-		// [新增调试日志]
-		console.log(`[DEBUG] VertexAIStrategy: Processed request body.`);
 		return JSON.stringify(bodyToModify);
 	}
 }
@@ -297,37 +270,23 @@ class GenericProxyStrategy implements RequestHandlerStrategy {
 
 const determineRequestType = (req: Request, body: ArrayBuffer | null): { type: RequestType, prefix: string | null, path: string, parsedBody?: any } => {
 	const { pathname } = new URL(req.url);
-	// [新增调试日志]
-	console.log(`[DEBUG] Determining request type for path: ${pathname}`);
-	
 	if (pathname.startsWith('/vertex/')) {
-		// [新增调试日志]
-		console.log(`[DEBUG] Path matched /vertex/. Routing to VERTEX_AI.`);
 		return { type: RequestType.VERTEX_AI, prefix: '/vertex', path: pathname.slice('/vertex'.length) };
 	}
-
 	const mappings = getApiMappings();
 	const prefix = Object.keys(mappings).filter(p => pathname.startsWith(p)).sort((a, b) => b.length - a.length)[0] || null;
 	const path = prefix ? pathname.slice(prefix.length) : pathname;
 	if (!prefix) {
-		console.log(`[DEBUG] No matching prefix found. Routing to UNKNOWN.`);
 		return { type: RequestType.UNKNOWN, prefix: null, path };
 	}
-
-	console.log(`[DEBUG] Matched prefix: "${prefix}". Path: "${path}".`);
 	if (prefix !== '/gemini') {
-		console.log(`[DEBUG] Routing to GENERIC_PROXY.`);
 		return { type: RequestType.GENERIC_PROXY, prefix, path };
 	}
-
 	if (!path.startsWith('/v1beta/')) {
-		console.log(`[DEBUG] Gemini prefix, non-native path. Routing to GEMINI_OPENAI.`);
 		let parsedBody: any = null;
 		if (body && req.method !== 'GET') try { parsedBody = JSON.parse(new TextDecoder().decode(body)); } catch { /* ignore */ }
 		return { type: RequestType.GEMINI_OPENAI, prefix, path, parsedBody };
 	}
-
-	console.log(`[DEBUG] Gemini prefix, native path. Routing to GEMINI_NATIVE.`);
 	return { type: RequestType.GEMINI_NATIVE, prefix, path };
 };
 
@@ -359,22 +318,18 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
 			const targetBody = await Promise.resolve(strategy.processRequestBody(context));
 			const res = await fetch(targetUrl, { method: req.method, headers: targetHeaders, body: targetBody });
 			if (!res.ok) {
-				// [新增调试日志] 读取错误响应体
 				const errorBodyText = await res.text();
-				console.error(`[DEBUG] Upstream request to ${targetUrl.hostname} FAILED. Status: ${res.status}. Body: ${errorBodyText}`);
-				// 克隆原始响应以便返回
+				console.error(`Upstream request to ${targetUrl.hostname} FAILED. Status: ${res.status}. Body: ${errorBodyText}`);
 				lastError = new Response(errorBodyText, { status: res.status, statusText: res.statusText, headers: res.headers });
 				if (attempts >= maxRetries) break; else continue;
 			}
-			console.log(`[DEBUG] Upstream request to ${targetUrl.hostname} SUCCEEDED. Status: ${res.status}`);
 			return strategy.handleResponse ? await strategy.handleResponse(res, context) : res;
 		} catch (error) {
-			console.error(`[DEBUG] Caught error in proxy loop. Attempt ${attempts}/${maxRetries}.`, error);
 			if (error instanceof Response) {
 				lastError = error.clone(); await error.body?.cancel();
 				if (attempts >= maxRetries) break; else continue;
 			} else {
-				console.error(`[FATAL] Attempt ${attempts} non-Response error for ${RequestType[type]}:`, error);
+				console.error(`Attempt ${attempts} non-Response error for ${RequestType[type]}:`, error);
 				return c.json({ error: `Internal Server Error: ${error instanceof Error ? error.message : "Unknown"}` }, 500);
 			}
 		}
