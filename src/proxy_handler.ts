@@ -35,10 +35,11 @@ interface AuthDetails {
 interface StrategyContext {
 	originalUrl: URL;
 	originalRequest: Request;
-	downstreamPath: string; // Path relative to the matched route prefix
+	downstreamPath: string;
 	routePrefix: string;
 	parsedBody?: any | null;
-	originalBodyBuffer?: ArrayBuffer | null;
+    // [FIXED] Type '... | undefined' is not assignable to type 'BodyInit | null'
+	originalBodyBuffer: ArrayBuffer | null;
 }
 
 // --- 内部辅助函数 ---
@@ -113,7 +114,6 @@ const resolveGeminiAuthDetails = (c: Context, modelName: string | null, attempt:
 
 class VertexAIStrategy implements RequestHandlerStrategy {
 	async getAuthDetails(c: Context, _ctx: StrategyContext, attempt: number): Promise<AuthDetails> {
-		// 安全检查：确保只有使用触发密钥的用户才能访问 Vertex AI 路由
 		if (!isTriggerKey(getApiKeyFromRequest(c))) {
 			throw new Response("A valid trigger API key is required for the /vertex endpoint.", { status: 401 });
 		}
@@ -141,7 +141,7 @@ class VertexAIStrategy implements RequestHandlerStrategy {
 		return headers;
 	}
 	processRequestBody(ctx: StrategyContext): BodyInit | null {
-		return ctx.originalBodyBuffer; // Vertex AI endpoint expects a standard OpenAI-compatible body
+		return ctx.originalBodyBuffer;
 	}
 }
 
@@ -164,7 +164,6 @@ class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 	}
 	processRequestBody(ctx: StrategyContext): BodyInit | null { return ctx.originalBodyBuffer; }
 	async handleResponse(response: Response, ctx: StrategyContext): Promise<Response> {
-		// 转换 /models 响应，移除 "models/" 前缀，以兼容 OpenAI 客户端
 		if (!ctx.downstreamPath.endsWith('/models') || !response.headers.get(HTTP_HEADER.CONTENT_TYPE)?.includes("application/json")) {
 			return response;
 		}
@@ -218,13 +217,20 @@ class GenericProxyStrategy implements RequestHandlerStrategy {
 
 // --- 策略选择与主处理函数 ---
 
+type RouteResult = {
+    requestType: RequestStrategyType;
+    routePrefix: string;
+    downstreamPath: string;
+    parsedBody: any | null;
+}
+
 /** 根据请求路径决定使用哪种路由策略 */
-const routeByPath = (req: Request, originalBodyBuffer: ArrayBuffer | null) => {
+const routeByPath = (req: Request, originalBodyBuffer: ArrayBuffer | null): RouteResult => {
 	const { pathname } = new URL(req.url);
 
-	const parseBodyIfNeeded = () => {
+	const parseBodyIfNeeded = (): any | null => {
 		if (originalBodyBuffer && req.method !== 'GET' && req.method !== 'HEAD') {
-			try { return JSON.parse(new TextDecoder().decode(originalBodyBuffer)); } catch { /* ignore parsing errors */ }
+			try { return JSON.parse(new TextDecoder().decode(originalBodyBuffer)); } catch { /* ignore */ }
 		}
 		return null;
 	};
@@ -266,7 +272,14 @@ export const handleProxyRequest = async (c: Context): Promise<Response> => {
 	}
 
 	const strategy = getStrategy(route.requestType);
-	const context: StrategyContext = { originalUrl: new URL(req.url), originalRequest: req.raw, ...route, originalBodyBuffer: bodyBuffer };
+	const context: StrategyContext = { 
+        originalUrl: new URL(req.url), 
+        originalRequest: req.raw, 
+        downstreamPath: route.downstreamPath,
+        routePrefix: route.routePrefix,
+        parsedBody: route.parsedBody,
+        originalBodyBuffer: bodyBuffer,
+    };
 
 	let attempts = 0;
 	let maxRetries = 1;
@@ -288,11 +301,10 @@ export const handleProxyRequest = async (c: Context): Promise<Response> => {
 				return strategy.handleResponse ? await strategy.handleResponse(proxyResponse, context) : proxyResponse;
 			}
             
-            // 记录失败信息并准备重试
 			lastError = proxyResponse.clone();
             const responseBodyText = await lastError.text();
 			console.error(`Attempt ${attempts}/${maxRetries} failed for ${RequestStrategyType[route.requestType]} to ${targetUrl}: ${lastError.status}`, responseBodyText);
-            await proxyResponse.body?.cancel(); // 释放连接
+            await proxyResponse.body?.cancel();
 
 		} catch (error) {
 			lastError = error instanceof Response ? error.clone() : error as Error;

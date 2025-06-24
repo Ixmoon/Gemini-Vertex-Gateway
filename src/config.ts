@@ -43,7 +43,9 @@ const parseGcpCredentials = (jsonStr: string): GcpCredential[] => {
             ? parsed.filter(isValidGcpCredential) 
             : (isValidGcpCredential(parsed) ? [parsed] : []);
 	} catch (e) {
-		console.error(`Error parsing GCP_CREDENTIALS_STRING: ${e.message}. It must be a valid JSON object or array of objects.`);
+        // [FIXED] 'e' is of type 'unknown'
+        const message = e instanceof Error ? e.message : String(e);
+		console.error(`Error parsing GCP_CREDENTIALS_STRING: ${message}. It must be a valid JSON object or array of objects.`);
 		return [];
 	}
 };
@@ -76,7 +78,8 @@ export const GCP_DEFAULT_LOCATION = getEnv("GCP_DEFAULT_LOCATION", "global");
  * API 路径前缀到目标 URL 的映射表。
  * 内置对 /gemini 和 /vertex 的支持，可通过 `API_MAPPINGS` 环境变量覆盖或扩展。
  */
-export const API_MAPPINGS = {
+// [FIXED] No index signature with a parameter of type 'string'
+export const API_MAPPINGS: Record<string, string> = {
     '/gemini': 'https://generativelanguage.googleapis.com',
     '/vertex': 'https://aiplatform.googleapis.com', // 占位符, 实际URL在策略中动态构建
     ...JSON.parse(getEnv("API_MAPPINGS") || '{}') as Record<string, string>,
