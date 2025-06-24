@@ -1,132 +1,125 @@
-// src/manage_api.ts
 /**
- * L3 - 应用层 (管理API)
- * 提供用于管理配置的 RESTful API 端点。
- * 所有在此文件中的路由都应受密码保护。
+ * @file 后台管理 API
+ * @description
+ * 提供了一套受密码保护的 RESTful API，用于管理网关的所有配置项。
+ * 使用 Hono 子应用实现，并通过中间件进行统一的 CORS 和密码认证处理。
  */
 import { Hono, Context } from "hono";
 import { cors } from "hono/middleware";
-import * as logic from "./config_logic.ts";
+import * as kvOps from "./replacekeys.ts";
+import { ensureKv } from "./replacekeys.ts";
 
-const manageApp = new Hono();
+// --- 辅助函数：创建标准化的 JSON 响应 ---
+function createErrorPayload(message: string, status = 500) {
+	return new Response(JSON.stringify({ error: message, success: false }), {
+		status, headers: { "Content-Type": "application/json" },
+	});
+}
+function createSuccessPayload(data: Record<string, any>, status = 200) {
+	return new Response(JSON.stringify({ ...data, success: true }), {
+		status, headers: { "Content-Type": "application/json" },
+	});
+}
 
 // --- 中间件 ---
 
-// CORS 中间件，允许前端调用
-manageApp.use('*', cors({
-	origin: '*',
-	allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-	allowHeaders: ['Content-Type', 'X-Admin-Password'],
-}));
+/** 管理员密码认证中间件 */
+const adminAuthMiddleware = async (c: Context, next: () => Promise<void>) => {
+	// 确保 KV 连接已建立，因为管理操作会直接读写 KV
+	try {
+		await ensureKv();
+	} catch (kvError) {
+		return c.json({ error: "Internal Server Error: Could not connect to data store." }, 500);
+	}
 
-// 关键修复：一个简单、统一的认证中间件，保护此子应用下的所有路由。
-const authMiddleware = async (c: Context, next: () => Promise<void>) => {
-    // 预检请求直接放行
-    if (c.req.method === 'OPTIONS') {
-        return new Response(null, { status: 204 });
-    }
-
-	const password = c.req.header('X-Admin-Password');
-	if (!password || !(await logic.verifyAdminPassword(password))) {
-		return c.json({ success: false, error: "Unauthorized" }, 401);
+	const adminPassword = c.req.header('X-Admin-Password');
+	if (!adminPassword) {
+		return c.json({ error: "Unauthorized: Missing X-Admin-Password header" }, 401);
+	}
+	// `verifyAdminPassword` 直接访问 KV 进行验证
+	const isValid = await kvOps.verifyAdminPassword(adminPassword);
+	if (!isValid) {
+		return c.json({ error: "Unauthorized: Invalid X-Admin-Password" }, 401);
 	}
 	await next();
 };
 
-// 应用认证中间件到所有路由
-manageApp.use('*', authMiddleware);
+// --- Hono 子应用实例 ---
+export const manageApp = new Hono();
 
-// --- 辅助函数 ---
-const handleApi = async <T>(
-    c: Context,
-    handler: () => Promise<T>,
-    successMessage: string | ((result: T) => string),
-    errorMessagePrefix: string
-): Promise<Response> => {
-    try {
-        const result = await handler();
-        const message = typeof successMessage === 'function' ? successMessage(result) : successMessage;
-        const payloadData = (result !== null && typeof result === 'object' && !Array.isArray(result)) ? result : { data: result };
-        return c.json({ success: true, message, ...payloadData }, 200);
-    } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        const status = (e instanceof TypeError || message.toLowerCase().includes("invalid") || message.toLowerCase().includes("must be")) ? 400 : 500;
-        return c.json({ success: false, error: `${errorMessagePrefix}: ${message}` }, status);
-    }
-};
+// 对所有管理 API 路由应用 CORS 和认证中间件
+manageApp.use('*', cors({ origin: '*' }));
+manageApp.use('*', adminAuthMiddleware);
 
-// --- 路由定义 (移除登录路由) ---
+// --- API 路由定义 ---
 
-// --- List-based configs (Trigger Keys, Pool Keys, Fallback Models) ---
-const createListEndpoints = (
-    path: string,
-    name: string,
-    getter: () => Promise<Set<string> | string[]>,
-    setter: (items: string[]) => Promise<void>
-) => {
-    manageApp.get(`/${path}`, (c) => handleApi(c, async () => ({ [path]: Array.from(await getter()) }), `${name} fetched.`, `Failed to fetch ${name}`));
-    manageApp.post(`/${path}`, async (c) => {
-        const body = await c.req.json().catch(() => null);
-        const items = body?.[path];
-        if (!Array.isArray(items) || !items.every(i => typeof i === 'string')) return c.json({ error: `Invalid input: ${path} must be an array of strings.` }, 400);
-        return handleApi(c, () => setter(items), `${name} list updated.`, `Failed to update ${name} list`);
-    });
-    manageApp.delete(`/${path}/all`, (c) => handleApi(c, () => setter([]), `All ${name} cleared.`, `Failed to clear ${name}`));
-};
+// 统一的 API 调用处理器，封装了 try-catch 和标准响应格式
+async function handleManageApiCall<T>(
+	logic: () => Promise<T>,
+	successMessage: string | ((result: T) => string),
+	errorMessagePrefix: string
+): Promise<Response> {
+	try {
+		const result = await logic();
+		const message = typeof successMessage === 'function' ? successMessage(result) : successMessage;
+		const payloadData = (result !== null && typeof result === 'object' && !Array.isArray(result)) ? result : { data: result };
+		return createSuccessPayload({ ...payloadData, message });
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return createErrorPayload(`${errorMessagePrefix}: ${message}`, error instanceof TypeError ? 400 : 500);
+	}
+}
 
-createListEndpoints('trigger-keys', 'Trigger Keys', logic.getTriggerKeys, logic.setTriggerKeys);
-createListEndpoints('pool-keys', 'Pool Keys', logic.getPoolKeys, logic.setPoolKeys);
-createListEndpoints('fallback-models', 'Fallback Models', logic.getFallbackModels, logic.setFallbackModels);
+// 辅助函数，用于处理接收 JSON 数组的 POST 请求
+async function handleJsonListPost<T>(c: Context, key: string, handler: (items: T[]) => Promise<void>, successMsg: string, errorMsg: string) {
+	try {
+		const body = await c.req.json();
+		const items = body[key];
+		if (!Array.isArray(items)) return createErrorPayload(`Invalid input: '${key}' must be an array.`, 400);
+		return handleManageApiCall(() => handler(items), successMsg, errorMsg);
+	} catch (e) {
+		return createErrorPayload(`Invalid JSON body: ${e.message}`, 400);
+	}
+}
 
-// 指定密钥 (Fallback Key)
-manageApp.get('/fallback-key', (c) => handleApi(c, async () => ({ key: await logic.getFallbackKey() }), "Fallback key fetched.", "Failed to fetch fallback key"));
-manageApp.post('/fallback-key', async (c) => {
-	const { key } = await c.req.json().catch(() => ({ key: undefined }));
-    if (key !== undefined && key !== null && typeof key !== 'string') return c.json({ error: "Invalid key provided, must be a string or null." }, 400);
-	return handleApi(c, () => logic.setFallbackKey(key), "Fallback key updated.", "Failed to update fallback key");
-});
+// 触发密钥
+manageApp.get('/trigger-keys', (c) => handleManageApiCall(async () => ({ keys: Array.from(await kvOps.getTriggerKeys()) }), "Trigger keys fetched.", "Failed to get trigger keys"));
+manageApp.post('/trigger-keys', async (c) => handleManageApiCall(() => kvOps.addTriggerKey((await c.req.json()).key), "Trigger key added.", "Failed to add trigger key"));
+manageApp.delete('/trigger-keys', async (c) => handleManageApiCall(() => kvOps.removeTriggerKey((await c.req.json()).key), "Trigger key removed.", "Failed to remove trigger key"));
+
+// 密钥池
+manageApp.get('/pool-keys', (c) => handleManageApiCall(async () => ({ keys: await kvOps.getPoolKeys() }), "Pool keys fetched.", "Failed to get pool keys"));
+manageApp.post('/pool-keys', (c) => handleJsonListPost(c, 'keys', kvOps.addPoolKeys, "Pool keys updated.", "Failed to update pool keys"));
+manageApp.delete('/pool-keys/all', (c) => handleManageApiCall(kvOps.clearPoolKeys, "All pool keys cleared.", "Failed to clear pool keys"));
+
+// 指定密钥
+manageApp.get('/fallback-key', (c) => handleManageApiCall(async () => ({ key: await kvOps.getFallbackKey() }), "Fallback key fetched.", "Failed to get fallback key"));
+manageApp.post('/fallback-key', async (c) => handleManageApiCall(() => kvOps.setFallbackKey((await c.req.json()).key), "Fallback key updated.", "Failed to update fallback key"));
+
+// 指定密钥触发模型
+manageApp.get('/fallback-models', (c) => handleManageApiCall(async () => ({ models: Array.from(await kvOps.getFallbackModels()) }), "Fallback models fetched.", "Failed to get fallback models"));
+manageApp.post('/fallback-models', (c) => handleJsonListPost(c, 'models', kvOps.addFallbackModels, "Fallback models updated.", "Failed to update fallback models"));
+manageApp.delete('/fallback-models/all', (c) => handleManageApiCall(kvOps.clearFallbackModels, "All fallback models cleared.", "Failed to clear fallback models"));
 
 // 重试次数
-manageApp.get('/retry-limit', (c) => handleApi(c, async () => ({ limit: await logic.getApiRetryLimit() }), "Retry limit fetched.", "Failed to fetch retry limit"));
-manageApp.post('/retry-limit', async (c) => {
-	const { limit } = await c.req.json().catch(() => ({ limit: null }));
-    if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1) return c.json({ error: "Invalid limit: must be a positive integer." }, 400);
-	return handleApi(c, () => logic.setApiRetryLimit(limit), "Retry limit updated.", "Failed to update retry limit");
-});
+manageApp.get('/retry-limit', (c) => handleManageApiCall(async () => ({ limit: await kvOps.getApiRetryLimit() }), "Retry limit fetched.", "Failed to get retry limit"));
+manageApp.post('/retry-limit', async (c) => handleManageApiCall(() => kvOps.setApiRetryLimit((await c.req.json()).limit), "Retry limit updated.", "Failed to set retry limit"));
 
-// GCP 配置
-manageApp.get('/gcp-settings', (c) => handleApi(c, async () => ({
-	credentials: await logic.getGcpCredentialsString(),
-	location: await logic.getGcpDefaultLocation(),
-}), "GCP settings fetched.", "Failed to fetch GCP settings"));
-manageApp.post('/gcp-settings', async (c) => {
-	const { credentials, location } = await c.req.json().catch(() => ({}));
-    if (credentials !== undefined && credentials !== null && typeof credentials !== 'string') return c.json({ error: "Invalid credentials: must be a string or null." }, 400);
-    if (location !== undefined && (typeof location !== 'string' || !location.trim())) return c.json({ error: "Invalid location: must be a non-empty string." }, 400);
+// GCP 设置
+manageApp.get('/gcp-credentials', (c) => handleManageApiCall(async () => ({ credentials: await kvOps.getGcpCredentialsString() }), "GCP credentials fetched.", "Failed to get GCP credentials"));
+manageApp.post('/gcp-credentials', async (c) => handleManageApiCall(() => kvOps.setGcpCredentialsString((await c.req.json()).credentials), "GCP credentials updated.", "Failed to set GCP credentials"));
+manageApp.get('/gcp-location', (c) => handleManageApiCall(async () => ({ location: await kvOps.getGcpDefaultLocation() }), "GCP location fetched.", "Failed to get GCP location"));
+manageApp.post('/gcp-location', async (c) => handleManageApiCall(() => kvOps.setGcpDefaultLocation((await c.req.json()).location), "GCP location updated.", "Failed to set GCP location"));
 
-	return handleApi(c, async () => {
-		const promises = [];
-		if (credentials !== undefined) promises.push(logic.setGcpCredentialsString(credentials));
-		if (location !== undefined) promises.push(logic.setGcpDefaultLocation(location.trim()));
-		await Promise.all(promises);
-	}, "GCP settings updated.", "Failed to update GCP settings");
-});
+// Vertex 模型
+manageApp.get('/vertex-models', (c) => handleManageApiCall(async () => ({ models: Array.from(await kvOps.getVertexModels()) }), "Vertex models fetched.", "Failed to get Vertex models"));
+manageApp.post('/vertex-models', (c) => handleJsonListPost(c, 'models', kvOps.addVertexModels, "Vertex models list updated.", "Failed to update Vertex models"));
+manageApp.delete('/vertex-models/all', (c) => handleManageApiCall(kvOps.clearVertexModels, "All Vertex models cleared.", "Failed to clear Vertex models"));
 
 // API 路径映射
-manageApp.get('/api-mappings', (c) => handleApi(c, async () => ({ mappings: await logic.getApiMappings() }), "API mappings fetched.", "Failed to fetch API mappings"));
+manageApp.get('/api-mappings', (c) => handleManageApiCall(async () => ({ mappings: await kvOps.getApiMappings() }), "API mappings fetched.", "Failed to get API mappings"));
 manageApp.post('/api-mappings', async (c) => {
-	const { mappings } = await c.req.json().catch(() => ({}));
-    if (typeof mappings !== 'object' || mappings === null || Array.isArray(mappings)) {
-        return c.json({ error: "Invalid mappings: must be an object." }, 400);
-    }
-	if (mappings['/gemini'] || mappings['/vertex']) {
-		return c.json({ error: "Cannot override reserved paths: /gemini, /vertex" }, 400);
-	}
-    for (const prefix in mappings) {
-        if (!prefix.startsWith('/')) return c.json({ error: `Invalid prefix "${prefix}": must start with /.` }, 400);
-        try { new URL(mappings[prefix]); } catch { return c.json({ error: `Invalid URL for prefix "${prefix}": ${mappings[prefix]}.` }, 400); }
-    }
-	return handleApi(c, () => logic.setApiMappings(mappings), "API mappings updated.", "Failed to update API mappings");
+	const { mappings } = await c.req.json();
+	return handleManageApiCall(() => kvOps.setApiMappings(mappings), "API mappings updated.", "Failed to set API mappings");
 });
-
-export { manageApp };
+manageApp.delete('/api-mappings', (c) => handleManageApiCall(kvOps.clearApiMappings, "API mappings cleared.", "Failed to clear API mappings"));

@@ -1,162 +1,180 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>LLM 网关管理</title>
+	<title>LLM Gateway Management</title>
 	<style>
-		body { font-family: system-ui, sans-serif; padding: 20px; background-color: #f8f9fa; color: #212529; line-height: 1.6; }
-		.container { max-width: 900px; margin: auto; background-color: #ffffff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-		h1, h2, h3, h4 { color: #007bff; }
-		h2 { border-bottom: 2px solid #dee2e6; padding-bottom: 10px; margin-top: 30px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; }
-		h3 { margin-top: 20px; margin-bottom: 15px; color: #17a2b8; }
-        h4 { margin-top: 15px; margin-bottom: 10px; font-size: 1.1rem; color: #343a40; }
-		details { border: 1px solid #e0e0e0; border-radius: 6px; margin-bottom: 15px; background-color: #fdfdfd; }
-		summary { padding: 12px 15px; cursor: pointer; font-weight: bold; background-color: #f1f3f5; border-radius: 5px 5px 0 0; }
-		details[open] summary { border-bottom: 1px solid #e0e0e0; }
-		.content { padding: 20px; }
-		label { display: block; margin-bottom: 8px; font-weight: 500; color: #495057; }
-		input[type="text"], input[type="password"], input[type="number"], textarea { width: calc(100% - 22px); padding: 10px; margin-bottom: 12px; border: 1px solid #ced4da; border-radius: 4px; font-size: 1rem; }
-		textarea { min-height: 120px; resize: vertical; font-family: monospace; }
-		button { padding: 10px 18px; margin-right: 8px; margin-bottom: 5px; cursor: pointer; border: none; border-radius: 4px; font-size: 0.95rem; background-color: #007bff; color: white; transition: background-color 0.2s ease; }
+		:root { --primary-color: #007bff; --danger-color: #dc3545; --light-gray: #f8f9fa; --border-color: #dee2e6; }
+		body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; padding: 20px; background-color: var(--light-gray); color: #212529; line-height: 1.5; }
+		.container { max-width: 900px; margin: auto; background-color: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+		h1, h2 { color: var(--primary-color); }
+		h2 { border-bottom: 2px solid var(--border-color); padding-bottom: 10px; margin-top: 2rem; margin-bottom: 1.5rem; display: flex; justify-content: space-between; align-items: center; }
+		h3 { margin-top: 1.5rem; margin-bottom: 1rem; color: #17a2b8; }
+		details { border: 1px solid var(--border-color); border-radius: 5px; margin-bottom: 1rem; background-color: #fff; transition: all 0.2s ease-in-out; }
+		details[open] { box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+		summary { padding: 12px 15px; cursor: pointer; font-weight: 600; background-color: var(--light-gray); list-style: none; }
+		summary::-webkit-details-marker { display: none; }
+		summary::before { content: '▶'; margin-right: 8px; font-size: 0.8em; transition: transform 0.2s; display: inline-block; }
+		details[open] > summary::before { transform: rotate(90deg); }
+		.content { padding: 1.5rem; border-top: 1px solid var(--border-color); }
+		input, textarea { width: calc(100% - 22px); padding: 10px; margin-bottom: 10px; border: 1px solid #ced4da; border-radius: 4px; font-size: 1rem; transition: border-color 0.2s; }
+		textarea { min-height: 120px; resize: vertical; font-family: "SF Mono", "Fira Code", monospace; }
+		input:focus, textarea:focus { border-color: var(--primary-color); outline: none; box-shadow: 0 0 0 2px rgba(0,123,255,0.25); }
+		button { padding: 10px 18px; margin-right: 8px; margin-bottom: 5px; cursor: pointer; border: none; border-radius: 4px; font-size: 0.95rem; background-color: var(--primary-color); color: white; transition: background-color 0.2s; }
 		button:hover { background-color: #0056b3; }
-		button.danger { background-color: #dc3545; }
+		button.danger { background-color: var(--danger-color); }
 		button.danger:hover { background-color: #c82333; }
 		button.secondary { background-color: #6c757d; }
-		button.secondary:hover { background-color: #5a6268; }
-		.item-list { list-style: none; padding: 0; max-height: 200px; overflow-y: auto; border: 1px solid #e9ecef; border-radius: 4px; margin-top: 10px; }
-		.item-list li { padding: 8px 12px; border-bottom: 1px dashed #e0e0e0; display: flex; justify-content: space-between; align-items: center; font-size: 0.9rem; }
-        .item-list li span { word-break: break-all; margin-right: 10px; }
-        .item-list li button { font-size: 0.8em; padding: 4px 8px; background-color: #f8d7da; border-color: #f5c6cb; color: #721c24; }
+		.item-list { list-style: none; padding-left: 0; max-height: 200px; overflow-y: auto; border: 1px solid var(--border-color); padding: 10px; border-radius: 4px; margin-top: 10px; }
+		.item-list li { padding: 8px 12px; border-bottom: 1px solid #e9ecef; display: flex; justify-content: space-between; align-items: center; }
 		.item-list li:last-child { border-bottom: none; }
-		#message-area { padding: 12px 15px; margin-bottom: 20px; border-radius: 5px; text-align: center; font-weight: 500; display: none; }
-		.success { background-color: #d1e7dd; color: #0f5132; border: 1px solid #badbcc; display: block; }
-		.error { background-color: #f8d7da; color: #842029; border: 1px solid #f5c2c7; display: block; }
+		.item-list li span { word-break: break-all; margin-right: 10px; font-family: monospace; font-size: 0.9em; }
+		.item-list li button { font-size: 0.8em; padding: 4px 8px; }
+		#message-area { padding: 12px 15px; margin-bottom: 20px; border-radius: 5px; text-align: center; font-weight: 500; transition: opacity 0.3s; }
+		.success { background-color: #d1e7dd; color: #0f5132; }
+		.error { background-color: #f8d7da; color: #842029; }
 		.hidden { display: none; }
-		.input-group { display: flex; align-items: center; margin-bottom: 10px; }
-		.input-group input { flex-grow: 1; margin-bottom: 0; margin-right: 8px; }
-		.input-group button { flex-shrink: 0; }
+		.input-group { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+		.input-group input { flex-grow: 1; margin-bottom: 0; }
 		.current-value { margin-top: 5px; font-size: 0.9em; color: #6c757d; }
 		.current-value strong { color: #343a40; }
-		.info-text { font-size: 0.85em; color: #6c757d; margin-top: -5px; margin-bottom: 15px; }
+		.current-value span[title] { cursor: help; border-bottom: 1px dashed; }
+		table { width: 100%; border-collapse: collapse; margin-bottom: 15px; }
+		th, td { border: 1px solid var(--border-color); padding: 10px; text-align: left; vertical-align: middle; }
+		th { background-color: var(--light-gray); font-weight: 600; }
+		td input { margin-bottom: 0; }
+		td button.delete-row { padding: 6px 10px; font-weight: bold; }
 	</style>
 </head>
 <body>
 	<div class="container">
-		<h1>LLM 网关管理</h1>
-		<div id="message-area"></div>
+		<h1>LLM Gateway Management</h1>
+		<div id="message-area" class="hidden"></div>
 
-		<!-- 登录区域 -->
-		<div id="login-section" class="content">
-			<h2>登录</h2>
-			<label for="login-password">管理员密码:</label>
-			<input type="password" id="login-password" required>
-			<button id="login-button">登录</button>
-			<p class="info-text">首次使用时，输入一个新密码（至少8位）即可完成设置并登录。</p>
+		<!-- Login Section -->
+		<div id="login-section">
+			<h2>Login</h2>
+			<div class="content">
+				<label for="login-password">Admin Password:</label>
+				<input type="password" id="login-password" required>
+				<button id="login-button">Login</button>
+			</div>
 		</div>
 
-		<!-- 管理内容区域 -->
+		<!-- Management Section (hidden by default) -->
 		<div id="management-section" class="hidden">
-			<h2>管理面板 <button id="logout-button" class="secondary">登出</button></h2>
+			<h2>Management Panel <button id="logout-button" class="secondary">Logout</button></h2>
 
-			<details open>
-				<summary>核心密钥配置 (Gemini)</summary>
+			<details>
+				<summary>Trigger Keys</summary>
 				<div class="content">
-                    <!-- Trigger Keys -->
-					<h3>触发密钥 (Trigger Keys)</h3>
-					<p class="info-text">客户端调用网关时必须提供的“通行证”。</p>
 					<div class="input-group">
-                        <input type="text" id="input-trigger-keys-single" placeholder="输入新的触发密钥">
-                        <button id="button-trigger-keys-add-single">添加</button>
-                    </div>
-                    <h4>当前触发密钥:</h4>
-                    <ul id="list-trigger-keys" class="item-list"><li>加载中...</li></ul>
-                    <hr>
-                    <h4>批量编辑 (JSON 数组)</h4>
-					<textarea id="textarea-trigger-keys" placeholder='["trigger-key-1", "trigger-key-2"]'></textarea>
-					<button id="button-trigger-keys-save">保存上方列表</button>
-                    <button id="button-trigger-keys-clear" class="danger">清空所有</button>
-
-                    <!-- Pool Keys -->
-					<h3 style="margin-top: 25px;">主密钥池 (Pool Keys)</h3>
-					<p class="info-text">用于 Gemini API 的密钥池，支持自动轮换和失败重试。</p>
-                    <div class="input-group">
-                        <input type="text" id="input-pool-keys-single" placeholder="输入新的池密钥">
-                        <button id="button-pool-keys-add-single">添加</button>
-                    </div>
-                    <h4>当前池密钥 (仅显示部分):</h4>
-                    <ul id="list-pool-keys" class="item-list"><li>加载中...</li></ul>
-                    <hr>
-                    <h4>批量编辑 (JSON 数组)</h4>
-					<textarea id="textarea-pool-keys" placeholder='["google-api-key-1", "google-api-key-2"]'></textarea>
-					<button id="button-pool-keys-save">保存上方列表</button>
-                    <button id="button-pool-keys-clear" class="danger">清空所有</button>
+						<input type="text" id="input-trigger-key-single" placeholder="Enter a new trigger key">
+						<button id="button-trigger-key-add">Add</button>
+					</div>
+					<h3>Current Trigger Keys:</h3>
+					<ul id="list-trigger-keys" class="item-list"></ul>
 				</div>
 			</details>
 
 			<details>
-				<summary>高级路由策略 (Gemini)</summary>
+				<summary>Main Key Pool</summary>
 				<div class="content">
-					<h3>指定密钥 (Fallback Key)</h3>
-					<p class="info-text">一个专用的 Google API 密钥，用于处理下方指定的模型请求。</p>
-					<input type="text" id="input-fallback-key" placeholder="输入专用的 Google API Key (留空则清除)">
-					<button id="button-fallback-key-save">保存指定密钥</button>
-					<p class="current-value">当前值: <strong id="current-fallback-key">加载中...</strong></p>
-					
-					<h3 style="margin-top: 25px;">指定密钥触发模型 (Fallback Models)</h3>
-					<p class="info-text">当请求的模型名称在此列表中时，将使用上方的“指定密钥”而非密钥池。</p>
-                    <div class="input-group">
-                        <input type="text" id="input-fallback-models-single" placeholder="输入新的模型名称">
-                        <button id="button-fallback-models-add-single">添加</button>
-                    </div>
-                    <h4>当前触发模型:</h4>
-                    <ul id="list-fallback-models" class="item-list"><li>加载中...</li></ul>
-                    <hr>
-                    <h4>批量编辑 (JSON 数组)</h4>
-					<textarea id="textarea-fallback-models" placeholder='["gemini-1.5-pro-latest", "some-paid-model"]'></textarea>
-					<button id="button-fallback-models-save">保存上方列表</button>
-                    <button id="button-fallback-models-clear" class="danger">清空所有</button>
+					<div class="input-group">
+						<input type="text" id="input-pool-keys-single" placeholder="Add a single key to editor">
+						<button id="button-pool-keys-add-single">Add to Editor</button>
+					</div>
+					 <h3>Edit Key Pool (JSON Array)</h3>
+					<textarea id="textarea-pool-keys" placeholder='[\n  "key1",\n  "key2"\n]'></textarea>
+					<button id="button-pool-keys-save">Save Key Pool</button>
+					<button id="button-pool-keys-clear" class="danger">Clear Key Pool</button>
+					<h3>Current Pool Preview (masked):</h3>
+					<ul id="list-pool-keys" class="item-list"></ul>
 				</div>
 			</details>
 
 			<details>
-				<summary>GCP 设置 (Vertex AI)</summary>
+				<summary>Fallback Key & Models</summary>
 				<div class="content">
-					<h3>GCP 服务账号凭证 JSON</h3>
-					<p class="info-text">用于访问 Vertex AI。可粘贴单个或多个（JSON数组格式）凭证以实现轮换。</p>
-					<textarea id="textarea-gcp-credentials" placeholder="粘贴你的 GCP 服务账号 JSON 内容..."></textarea>
+					<h3>Fallback Key</h3>
+					<div class="input-group">
+						<input type="text" id="input-fallback-key" placeholder="Enter fallback key (empty to clear)">
+						<button id="button-fallback-key-set">Set/Update</button>
+					</div>
+					<p class="current-value">Current Fallback Key: <strong id="current-fallback-key"></strong></p>
 					
-					<label for="input-gcp-location" style="margin-top: 15px;">默认 GCP Location</label>
-					<input type="text" id="input-gcp-location" placeholder="例如: us-central1, global">
-					
-					<button id="button-gcp-settings-save">保存 GCP 设置</button>
-					<p class="current-value">当前 Location: <strong id="current-gcp-location">加载中...</strong></p>
-					<p class="current-value">当前凭证状态: <strong id="current-gcp-credentials-status">加载中...</strong></p>
+					<h3>Fallback Models</h3>
+					<div class="input-group">
+						<input type="text" id="input-fallback-models-single" placeholder="Add a single model to editor">
+						<button id="button-fallback-models-add-single">Add to Editor</button>
+					</div>
+					<textarea id="textarea-fallback-models" placeholder='[\n  "model-1",\n  "model-2"\n]'></textarea>
+					<button id="button-fallback-models-save">Save Models</button>
+					<button id="button-fallback-models-clear" class="danger">Clear Models</button>
+					<h3>Current Fallback Models:</h3>
+					<ul id="list-fallback-models" class="item-list"></ul>
+				</div>
+			</details>
+
+			<details>
+				<summary>Proxy & Retry Settings</summary>
+				<div class="content">
+					<h3>API Call Retry Limit (for Pool Keys)</h3>
+					<div class="input-group">
+						<input type="number" id="input-api-retry-limit" min="1" placeholder="Enter max attempts">
+						<button id="button-api-retry-limit-set">Set</button>
+					</div>
+					<p class="current-value">Current Limit: <strong id="current-api-retry-limit"></strong></p>
+				</div>
+			</details>
+
+			<details>
+				<summary>GCP & Vertex AI Settings</summary>
+				<div class="content">
+					<h3>GCP Service Account Credentials</h3>
+					<textarea id="textarea-gcp-credentials" placeholder="Paste your GCP service account JSON content here..."></textarea>
+					<p class="current-value">Current Credentials Status: <strong id="current-gcp-credentials-status"></strong></p>
+
+					<h3>Default GCP Location</h3>
+					<input type="text" id="input-gcp-location" placeholder="e.g., us-central1, global">
+					<p class="current-value">Current Location: <strong id="current-gcp-location"></strong></p>
+					<button id="button-gcp-settings-save">Save GCP Settings</button>
+
+					<h3>Vertex AI Model List</h3>
+					<div class="input-group">
+						<input type="text" id="input-vertex-models-single" placeholder="Add a single model to editor">
+						<button id="button-vertex-models-add-single">Add to Editor</button>
+					</div>
+					<textarea id="textarea-vertex-models" placeholder='[\n  "gemini-1.5-pro-preview-0409",\n  "gemini-1.0-pro"\n]'></textarea>
+					<button id="button-vertex-models-save">Save Models</button>
+					<button id="button-vertex-models-clear" class="danger">Clear Models</button>
+					<h3>Current Vertex Models:</h3>
+					<ul id="list-vertex-models" class="item-list"></ul>
 				</div>
 			</details>
 			
-			<details>
-				<summary>全局设置</summary>
+			<details open>
+				<summary>API Path Mappings</summary>
 				<div class="content">
-					<h3>API 调用重试次数</h3>
-					<p class="info-text">当使用主密钥池或 Vertex AI 凭证调用失败时，最多尝试多少个不同的密钥/凭证。</p>
-					<div class="input-group">
-						<input type="number" id="input-api-retry-limit" min="1" placeholder="默认: 3">
-						<button id="button-api-retry-limit-save">设置</button>
-					</div>
-					<p class="current-value">当前设置: <strong id="current-api-retry-limit">加载中...</strong></p>
+					<h3>Mappings Table</h3>
+					<table id="table-api-mappings">
+						<thead>
+							<tr>
+								<th>Proxy Prefix</th>
+								<th>Target URL</th>
+								<th style="width: 80px;">Action</th>
+							</tr>
+						</thead>
+						<tbody id="tbody-api-mappings"></tbody>
+					</table>
+					<button id="button-api-mappings-add-row">Add Row</button>
+					<h3>JSON Preview & Editor</h3>
+					<textarea id="textarea-api-mappings-preview" placeholder='{\n  "/gemini": "https://generativelanguage.googleapis.com",\n  "/openai": "https://api.openai.com"\n}'></textarea>
+					<button id="button-api-mappings-save">Save Mappings</button>
+					<button id="button-api-mappings-clear" class="danger">Clear Mappings</button>
 				</div>
 			</details>
-
-			<details>
-				<summary>自定义代理映射 (可选)</summary>
-				<div class="content">
-					<p class="info-text">配置额外的代理路径。注意：这些路径是基础的HTTP转发，不具备 Gemini/Vertex 的高级功能。<strong>不允许设置 /gemini 和 /vertex。</strong></p>
-					<textarea id="textarea-api-mappings" placeholder='{&#10;  "/my-service": "https://api.example.com/v1",&#10;  "/another-prefix": "http://some-internal-service"&#10;}'></textarea>
-					<button id="button-api-mappings-save">保存自定义映射</button>
-				</div>
-			</details>
-
 		</div>
 	</div>
 	<script src="/manage.js"></script>
