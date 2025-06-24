@@ -2,6 +2,7 @@
 /**
  * L3 - 应用层 (管理API)
  * 提供用于管理配置的 RESTful API 端点。
+ * 所有在此文件中的路由都应受密码保护。
  */
 import { Hono, Context } from "hono";
 import { cors } from "hono/middleware";
@@ -10,39 +11,34 @@ import * as logic from "./config_logic.ts";
 const manageApp = new Hono();
 
 // --- 中间件 ---
+
+// CORS 中间件，允许前端调用
 manageApp.use('*', cors({
 	origin: '*',
 	allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
 	allowHeaders: ['Content-Type', 'X-Admin-Password'],
 }));
 
+// 关键修复：一个简单、统一的认证中间件，保护此子应用下的所有路由。
 const authMiddleware = async (c: Context, next: () => Promise<void>) => {
-    // 关键修复 #1: 首先，无条件放行所有 OPTIONS 预检请求。
-    // 这是处理 CORS 复杂请求的必要步骤。
+    // 预检请求直接放行
     if (c.req.method === 'OPTIONS') {
-        return c.text("OK", 200); // 直接返回 200 OK 响应，让浏览器预检通过
+        return new Response(null, { status: 204 });
     }
 
-    // 关键修复 #2: 检查相对于挂载点的路径 /login。
-    // 只有非 OPTIONS 的 /login 请求（也就是真正的 POST 登录请求）会走到这里。
-    if (c.req.path === '/login') {
-		return await next(); // 如果是登录请求，直接放行
-	}
-
-    // 对于所有其他请求，进行密码验证
 	const password = c.req.header('X-Admin-Password');
 	if (!password || !(await logic.verifyAdminPassword(password))) {
 		return c.json({ success: false, error: "Unauthorized" }, 401);
 	}
 	await next();
 };
-// 应用中间件
-manageApp.use('*', authMiddleware);
 
+// 应用认证中间件到所有路由
+manageApp.use('*', authMiddleware);
 
 // --- 辅助函数 ---
 const handleApi = async <T>(
-    c: Context, // Pass context first
+    c: Context,
     handler: () => Promise<T>,
     successMessage: string | ((result: T) => string),
     errorMessagePrefix: string
@@ -59,32 +55,7 @@ const handleApi = async <T>(
     }
 };
 
-// --- 路由定义 ---
-
-// 登录
-manageApp.post('/login', async (c) => {
-	const { password } = await c.req.json().catch(() => ({ password: null }));
-	if (!password || typeof password !== 'string') {
-        return c.json({ success: false, error: "Password must be a string." }, 400);
-    }
-	const hash = await logic.getAdminPasswordHash();
-	if (hash) {
-		if (await logic.verifyAdminPassword(password)) {
-			return c.json({ success: true, message: "Login successful." });
-		}
-		return c.json({ success: false, error: "Invalid password." }, 401);
-	} else {
-		if (password.length >= 8) {
-			try {
-                await logic.setAdminPassword(password);
-                return c.json({ success: true, message: "Admin password set and logged in." });
-            } catch (e) {
-                return c.json({ success: false, error: `Failed to set password: ${e instanceof Error ? e.message : String(e)}` }, 500);
-            }
-		}
-		return c.json({ success: false, error: "Admin password not set. Provide a password (min 8 chars) to set it." }, 401);
-	}
-});
+// --- 路由定义 (移除登录路由) ---
 
 // --- List-based configs (Trigger Keys, Pool Keys, Fallback Models) ---
 const createListEndpoints = (
