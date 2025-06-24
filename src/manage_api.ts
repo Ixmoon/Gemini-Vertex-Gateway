@@ -1,3 +1,4 @@
+// src/manage_api.ts
 /**
  * L3 - 应用层 (管理API)
  * 提供用于管理配置的 RESTful API 端点。
@@ -16,12 +17,11 @@ manageApp.use('*', cors({
 }));
 
 const authMiddleware = async (c: Context, next: () => Promise<void>) => {
-    // ############ FIX IS HERE ############
-    // 检查完整的请求路径，而不是相对路径
-    if (c.req.path === '/api/manage/login') {
+    // CORRECTED: 在 Hono sub-app 中，c.req.path 是相对于挂载点 (/api/manage) 的路径。
+    // 因此，对 /api/manage/login 的请求，这里的路径是 /login。
+    if (c.req.path === '/login') {
 		return await next(); // 如果是登录请求，直接放行
 	}
-    // #####################################
 
 	const password = c.req.header('X-Admin-Password');
 	if (!password || !(await logic.verifyAdminPassword(password))) {
@@ -86,14 +86,18 @@ const createListEndpoints = (
     getter: () => Promise<Set<string> | string[]>,
     setter: (items: string[]) => Promise<void>
 ) => {
-    // 注意：这里的路径是相对路径，例如 '/trigger-keys'
+    // GET /path - 获取列表
     manageApp.get(`/${path}`, (c) => handleApi(c, async () => ({ [path]: Array.from(await getter()) }), `${name} fetched.`, `Failed to fetch ${name}`));
+    
+    // POST /path - 更新整个列表
     manageApp.post(`/${path}`, async (c) => {
         const body = await c.req.json().catch(() => null);
         const items = body?.[path];
         if (!Array.isArray(items) || !items.every(i => typeof i === 'string')) return c.json({ error: `Invalid input: ${path} must be an array of strings.` }, 400);
         return handleApi(c, () => setter(items), `${name} list updated.`, `Failed to update ${name} list`);
     });
+
+    // ADDED: DELETE /path/all - 清空列表 (对应前端的 "Clear All" 按钮)
     manageApp.delete(`/${path}/all`, (c) => handleApi(c, () => setter([]), `All ${name} cleared.`, `Failed to clear ${name}`));
 };
 
