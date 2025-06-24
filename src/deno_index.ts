@@ -1,4 +1,5 @@
-import { Hono,Context } from "hono";
+// deno-lint-ignore-file no-explicit-any
+import { Hono, Context } from "hono";
 import { GoogleAuth } from "google-auth-library";
 
 // =================================================================================
@@ -127,9 +128,6 @@ interface RequestHandlerStrategy {
 	handleResponse?(res: Response, ctx: StrategyContext): Promise<Response>;
 }
 
-/**
- * [已修正] Vertex AI 策略 - 完全恢复原始代码的请求体处理逻辑
- */
 class VertexAIStrategy implements RequestHandlerStrategy {
 	async getAuthenticationDetails(c: Context, _ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
 		if (!getTriggerKeys().has(getApiKeyFromReq(c) || '')) {
@@ -162,61 +160,48 @@ class VertexAIStrategy implements RequestHandlerStrategy {
 	}
 	
 	async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null> {
-		// 如果是 GET 或 HEAD 请求，则没有请求体
 		if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD') {
 			return null;
 		}
-
-		// 如果没有预读的请求体 buffer，也返回 null
+		
 		if (!ctx.originalBodyBuffer) {
 			console.warn("Vertex: No body buffer found for non-GET/HEAD request.");
 			return null;
 		}
 
+		let bodyToModify: any;
 		try {
-			// 解析请求体
-			const bodyToModify = JSON.parse(new TextDecoder().decode(ctx.originalBodyBuffer));
-
-			// 检查解析结果是否为对象
-			if (typeof bodyToModify !== 'object' || bodyToModify === null) {
-				console.warn("Vertex: Parsed body is not an object, cannot apply modifications.");
-				return JSON.stringify(bodyToModify);
-			}
-
-			// --- 执行关键的请求体修改 ---
-
-			// 1. 为模型名称添加 'google/' 前缀
-			if (bodyToModify.model && typeof bodyToModify.model === 'string' && !bodyToModify.model.startsWith('google/')) {
-				bodyToModify.model = `google/${bodyToModify.model}`;
-			}
-
-			// 2. 如果 reasoning_effort 为 'none'，则删除该字段
-			if (bodyToModify.reasoning_effort === 'none') {
-				delete bodyToModify.reasoning_effort;
-			}
-
-			// 3. 注入必需的 'google.safety_settings' 块
-			bodyToModify.google = {
-				...(bodyToModify.google || {}),
-				safety_settings: [
-					{ "category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF" },
-					{ "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF" },
-					{ "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF" },
-					{ "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF" },
-				]
-			};
-
-			// 返回修改后的、序列化为 JSON 字符串的请求体
-			return JSON.stringify(bodyToModify);
-
+			// [已修正] 将 JSON 解析放在 try...catch 块中，以防请求体无效导致崩溃
+			bodyToModify = JSON.parse(new TextDecoder().decode(ctx.originalBodyBuffer));
 		} catch (e) {
-			console.error("Vertex: Failed to parse and modify request body:", e);
-			// 如果解析或修改失败，抛出一个标准的 400 错误响应
-			throw new Response("Failed to parse or modify request body for Vertex AI. Invalid JSON.", { status: 400 });
+			console.error("Vertex: Failed to parse request body from buffer:", e);
+			// [已修正] 如果解析失败，抛出标准的 400 响应，而不是让程序崩溃
+			throw new Response("Failed to parse request body for Vertex AI. Invalid JSON.", { status: 400 });
 		}
+
+		// 只有在成功解析后才继续修改
+		if (typeof bodyToModify !== 'object' || bodyToModify === null) {
+			console.warn("Vertex: Parsed body is not an object, cannot apply modifications.");
+			return JSON.stringify(bodyToModify);
+		}
+		if (bodyToModify.model && typeof bodyToModify.model === 'string' && !bodyToModify.model.startsWith('google/')) {
+			bodyToModify.model = `google/${bodyToModify.model}`;
+		}
+		if (bodyToModify.reasoning_effort === 'none') {
+			delete bodyToModify.reasoning_effort;
+		}
+		bodyToModify.google = {
+			...(bodyToModify.google || {}),
+			safety_settings: [
+				{ "category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF" },
+				{ "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF" },
+				{ "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF" },
+				{ "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF" },
+			]
+		};
+		return JSON.stringify(bodyToModify);
 	}
 }
-
 
 class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 	getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number) { return _getGeminiAuthDetails(c, (ctx.parsedBody as any)?.model, attempt, "Gemini OpenAI"); }
@@ -312,7 +297,7 @@ const getStrategy = (type: RequestType): RequestHandlerStrategy => {
 };
 
 const handleGenericProxy = async (c: Context): Promise<Response> => {
-    const req = c.req.raw;
+	const req = c.req.raw;
 	const bodyBuffer = (req.method !== 'GET' && req.method !== 'HEAD' && req.body) ? await req.clone().arrayBuffer() : null;
 	const { type, ...details } = determineRequestType(req, bodyBuffer);
 	if (type === RequestType.UNKNOWN) return c.json({ error: `No route for path: ${new URL(req.url).pathname}` }, 404);
