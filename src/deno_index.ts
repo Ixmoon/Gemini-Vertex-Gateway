@@ -294,10 +294,17 @@ class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 	buildTargetUrl(ctx: StrategyContext): URL {
 		const baseUrl = this.config.apiMappings['/gemini'];
 		if (!baseUrl) throw new Response("Gemini base URL for '/gemini' not in API_MAPPINGS.", { status: 503 });
-		let path = ctx.path;
-		if (['/chat/completions', '/embeddings', '/models'].includes(ctx.path)) path = '/v1beta' + ctx.path;
-		else if (ctx.path.startsWith('/v1/')) path = '/v1beta' + ctx.path.slice(3);
-		const url = new URL(path, baseUrl);
+
+		// 从原始路径中移除可选的 /v1 前缀，以获得标准的 OpenAI 路径
+		let openAIPath = ctx.path;
+		if (openAIPath.startsWith('/v1/')) {
+			openAIPath = openAIPath.slice(3); // e.g., /v1/chat/completions -> /chat/completions
+		}
+
+		// 构建符合 Gemini OpenAI 兼容层要求的正确路径
+		const geminiPath = `/v1beta/openai${openAIPath}`;
+
+		const url = new URL(geminiPath, baseUrl);
 		ctx.originalUrl.searchParams.forEach((v, k) => k.toLowerCase() !== 'key' && url.searchParams.set(k, v));
 		return url;
 	}
