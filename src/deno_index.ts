@@ -247,7 +247,7 @@ class VertexAIStrategy implements RequestHandlerStrategy {
 		return headers;
 	}
 	
-	async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null> {
+	processRequestBody(ctx: StrategyContext): BodyInit | null {
 		if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD') {
 			return null;
 		}
