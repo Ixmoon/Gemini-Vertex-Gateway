@@ -1,43 +1,70 @@
-// deno-lint-ignore-file no-explicit-any
 import { Hono, Context } from "hono";
 import { GoogleAuth } from "google-auth-library";
 
 // =================================================================================
 // --- 1. 配置模块 (从环境变量读取) ---
 // =================================================================================
+const ENV_KEYS = {
+	TRIGGER_KEYS: "TRIGGER_KEYS",
+	POOL_KEYS: "POOL_KEYS",
+	FALLBACK_KEY: "FALLBACK_KEY",
+	FALLBACK_MODELS: "FALLBACK_MODELS",
+	API_RETRY_LIMIT: "API_RETRY_LIMIT",
+	GCP_CREDENTIALS: "GCP_CREDENTIALS",
+	GCP_DEFAULT_LOCATION: "GCP_DEFAULT_LOCATION",
+	API_MAPPINGS: "API_MAPPINGS",
+};
 
 const getSetFromEnv = (varName: string): Set<string> => {
 	const val = Deno.env.get(varName);
 	return val ? new Set(val.split(',').map(s => s.trim()).filter(Boolean)) : new Set();
 };
-const getTriggerKeys = (): Set<string> => getSetFromEnv("TRIGGER_KEYS");
-const getPoolKeys = (): string[] => Array.from(getSetFromEnv("POOL_KEYS"));
-const getFallbackKey = (): string | null => Deno.env.get("FALLBACK_KEY") || null;
-const getFallbackModels = (): Set<string> => getSetFromEnv("FALLBACK_MODELS");
-const getApiRetryLimit = (): number => {
-	const limit = parseInt(Deno.env.get("API_RETRY_LIMIT") || "1", 10);
-	return isNaN(limit) || limit < 1 ? 1 : limit;
+
+const getRandomElement = <T>(arr: T[]): T | undefined => {
+	if (arr.length === 0) return undefined;
+	return arr[Math.floor(Math.random() * arr.length)];
 };
-const getGcpCredentialsString = (): string | null => Deno.env.get("GCP_CREDENTIALS") || null;
-const getGcpDefaultLocation = (): string => Deno.env.get("GCP_DEFAULT_LOCATION") || "global";
-const getApiMappings = (): Record<string, string> => {
-	const mappings: Record<string, string> = {};
-	const raw = Deno.env.get("API_MAPPINGS");
-	if (raw) {
-		raw.split(',').forEach(pair => {
-			const parts = pair.trim().match(/^(\/.*?):(.+)$/);
-			if (parts && parts.length === 3) {
-				try {
-					new URL(parts[2]);
-					mappings[parts[1]] = parts[2];
-				} catch {
-					console.warn(`[Config] Invalid URL in API_MAPPINGS for prefix "${parts[1]}"`);
+
+const CONFIG = {
+	triggerKeys: getSetFromEnv(ENV_KEYS.TRIGGER_KEYS),
+	poolKeys: Array.from(getSetFromEnv(ENV_KEYS.POOL_KEYS)),
+	fallbackKey: Deno.env.get(ENV_KEYS.FALLBACK_KEY) || null,
+	fallbackModels: getSetFromEnv(ENV_KEYS.FALLBACK_MODELS),
+	apiRetryLimit: (() => {
+		const limit = parseInt(Deno.env.get(ENV_KEYS.API_RETRY_LIMIT) || "1", 10);
+		return isNaN(limit) || limit < 1 ? 1 : limit;
+	})(),
+	gcpCredentialsString: Deno.env.get(ENV_KEYS.GCP_CREDENTIALS) || null,
+	gcpDefaultLocation: Deno.env.get(ENV_KEYS.GCP_DEFAULT_LOCATION) || "global",
+	apiMappings: (() => {
+		const mappings: Record<string, string> = {};
+		const raw = Deno.env.get(ENV_KEYS.API_MAPPINGS);
+		if (raw) {
+			raw.split(',').forEach(pair => {
+				const parts = pair.trim().match(/^(\/.*?):(.+)$/);
+				if (parts && parts.length === 3) {
+					try {
+						new URL(parts[2]);
+						mappings[parts[1]] = parts[2];
+					} catch {
+						console.warn(`[Config] Invalid URL in API_MAPPINGS for prefix "${parts[1]}"`);
+					}
 				}
-			}
-		});
-	}
-	return mappings;
+			});
+		}
+		return mappings;
+	})(),
 };
+
+type AppConfig = typeof CONFIG;
+
+const getTriggerKeys = (): Set<string> => CONFIG.triggerKeys;
+const getPoolKeys = (): string[] => CONFIG.poolKeys;
+const getFallbackKey = (): string | null => CONFIG.fallbackKey;
+const getFallbackModels = (): Set<string> => CONFIG.fallbackModels;
+const getApiRetryLimit = (): number => CONFIG.apiRetryLimit;
+const getGcpCredentialsString = (): string | null => CONFIG.gcpCredentialsString;
+const getApiMappings = (): Record<string, string> => CONFIG.apiMappings;
 
 // =================================================================================
 // --- 2. 类型定义与常量 ---
@@ -48,7 +75,16 @@ type ApiKeySource = 'user' | 'fallback' | 'pool';
 type ApiKeyResult = { key: string; source: ApiKeySource };
 enum RequestType { VERTEX_AI, GEMINI_OPENAI, GEMINI_NATIVE, GENERIC_PROXY, UNKNOWN }
 interface AuthenticationDetails { key: string | null; source: ApiKeySource | null; gcpToken: string | null; gcpProject: string | null; maxRetries: number; }
-interface StrategyContext { originalUrl: URL; originalRequest: Request; path: string; prefix: string | null; parsedBody?: any | null; originalBodyBuffer?: ArrayBuffer | null; }
+interface GoogleSafetySetting {
+	category: string;
+	threshold: string;
+}
+interface GoogleSpecificSettings {
+	safety_settings?: GoogleSafetySetting[];
+}
+interface ModelProviderRequestBody { model?: string; reasoning_effort?: string; google?: GoogleSpecificSettings; }
+interface GeminiModel { id: string; }
+interface StrategyContext { originalUrl: URL; originalRequest: Request; path: string; prefix: string | null; parsedBody?: ModelProviderRequestBody | null; originalBodyBuffer?: ArrayBuffer | null; }
 
 // =================================================================================
 // --- 3. 核心 API 密钥选择与 GCP 认证逻辑 ---
@@ -62,36 +98,73 @@ const getApiKeyForRequest = (userKey: string | null, model: string | null): ApiK
 		if (fbKey) return { key: fbKey, source: 'fallback' };
 	}
 	const pool = getPoolKeys();
-	if (pool.length > 0) return { key: pool[Math.floor(Math.random() * pool.length)], source: 'pool' };
+	const randomPoolKey = getRandomElement(pool);
+	if (randomPoolKey) return { key: randomPoolKey, source: 'pool' };
 	return null;
 };
 
-const isValidGcpCred = (cred: any): cred is GcpCredentials =>
-	cred?.type === 'service_account' && cred?.project_id && cred?.private_key && cred?.client_email;
+const isValidGcpCred = (cred: unknown): cred is GcpCredentials => {
+	if (typeof cred !== 'object' || cred === null) {
+		return false;
+	}
+	const maybeCred = cred as Record<string, unknown>;
+	return (
+		maybeCred.type === 'service_account' &&
+		!!maybeCred.project_id &&
+		!!maybeCred.private_key &&
+		!!maybeCred.client_email
+	);
+};
 
-const getGcpAuth = async (): Promise<{ token: string; projectId: string } | null> => {
-	const credsStr = getGcpCredentialsString();
-	if (!credsStr) return null;
-	let creds: GcpCredentials[] = [];
+const gcpAuthManager = (() => {
+	const authInstanceCache = new Map<string, GoogleAuth>();
+	let credentials: GcpCredentials[] = [];
+
 	try {
-		const parsed = JSON.parse(credsStr);
-		creds = (Array.isArray(parsed) ? parsed : [parsed]).filter(isValidGcpCred);
-	} catch (e) { console.error("[GCP] Failed to parse GCP_CREDENTIALS:", e); }
-	if (creds.length === 0) return null;
-	const selected = creds[Math.floor(Math.random() * creds.length)];
-	try {
-		const auth = new GoogleAuth({ credentials: selected, scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
-		const token = await auth.getAccessToken();
-		if (!token) {
-			console.error(`[GCP] Failed to get Access Token for project: ${selected.project_id}`);
+		const credsStr = getGcpCredentialsString();
+		if (credsStr) {
+			const parsed = JSON.parse(credsStr);
+			credentials = (Array.isArray(parsed) ? parsed : [parsed]).filter(isValidGcpCred);
+		}
+		if (credentials.length === 0) {
+			console.warn("[GCP] No valid GCP credentials found in GCP_CREDENTIALS.");
+		}
+	} catch (e) {
+		console.error("[GCP] Failed to parse GCP_CREDENTIALS on startup:", e);
+	}
+	
+	const getAuthInstance = (credential: GcpCredentials): GoogleAuth => {
+		if (!authInstanceCache.has(credential.client_email)) {
+			const newAuthInstance = new GoogleAuth({
+				credentials: credential,
+				scopes: ["https://www.googleapis.com/auth/cloud-platform"]
+			});
+			authInstanceCache.set(credential.client_email, newAuthInstance);
+		}
+		return authInstanceCache.get(credential.client_email)!;
+	};
+
+	const getAuth = async (): Promise<{ token: string; projectId: string } | null> => {
+		if (credentials.length === 0) return null;
+		const selectedCredential = getRandomElement(credentials);
+		if (!selectedCredential) return null;
+
+		try {
+			const auth = getAuthInstance(selectedCredential);
+			const token = await auth.getAccessToken();
+			if (!token) {
+				console.error(`[GCP] Failed to get Access Token for project: ${selectedCredential.project_id}`);
+				return null;
+			}
+			return { token, projectId: selectedCredential.project_id };
+		} catch (error) {
+			console.error(`[GCP] Error during token acquisition for project ${selectedCredential.project_id}:`, error);
 			return null;
 		}
-		return { token, projectId: selected.project_id };
-	} catch (error) {
-		console.error(`[GCP] Error during token acquisition for project ${selected.project_id}:`, error);
-		return null;
-	}
-};
+	};
+
+	return { getAuth };
+})();
 
 // =================================================================================
 // --- 4. 请求处理策略 (Strategy Pattern) ---
@@ -112,7 +185,8 @@ const _getGeminiAuthDetails = (c: Context, model: string | null, attempt: number
 		if (!result && !isModels) throw new Response(`No valid API key (${name})`, { status: 401 });
 	} else if (userApiKey && getTriggerKeys().has(userApiKey)) {
 		const pool = getPoolKeys();
-		if (pool.length > 0) result = { key: pool[Math.floor(Math.random() * pool.length)], source: 'pool' };
+		const randomPoolKey = getRandomElement(pool);
+		if (randomPoolKey) result = { key: randomPoolKey, source: 'pool' };
 		else if (!isModels) throw new Response(`Key pool exhausted (${name})`, { status: 503 });
 	} else if (attempt > 1 && !isModels) {
 		throw new Response(`Request failed, non-trigger key won't be retried (${name})`, { status: 503 });
@@ -129,21 +203,29 @@ interface RequestHandlerStrategy {
 }
 
 class VertexAIStrategy implements RequestHandlerStrategy {
+	private readonly config: AppConfig;
+	private readonly gcpAuth: () => Promise<{ token: string; projectId: string; } | null>;
+
+	constructor(config: AppConfig, gcpAuth: () => Promise<{ token: string; projectId: string; } | null>) {
+		this.config = config;
+		this.gcpAuth = gcpAuth;
+	}
+
 	async getAuthenticationDetails(c: Context, _ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
 		const userKey = getApiKeyFromReq(c) || 'N/A';
-		if (!getTriggerKeys().has(userKey)) {
+		if (!this.config.triggerKeys.has(userKey)) {
 			throw new Response("Forbidden: A valid trigger key is required for the /vertex endpoint.", { status: 403 });
 		}
-		const auth = await getGcpAuth();
+		const auth = await this.gcpAuth();
 		if (!auth && attempt === 1) {
 			throw new Response("GCP authentication failed on first attempt. Check GCP_CREDENTIALS.", { status: 503 });
 		}
-		return { key: null, source: null, gcpToken: auth?.token || null, gcpProject: auth?.projectId || null, maxRetries: getApiRetryLimit() };
+		return { key: null, source: null, gcpToken: auth?.token || null, gcpProject: auth?.projectId || null, maxRetries: this.config.apiRetryLimit };
 	}
 
 	buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
 		if (!auth.gcpProject) throw new Error("Vertex AI requires a GCP Project ID.");
-		const loc = getGcpDefaultLocation();
+		const loc = this.config.gcpDefaultLocation;
 		const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
 		const baseUrl = `https://${host}/v1beta1/projects/${auth.gcpProject}/locations/${loc}/endpoints/openapi`;
 		
@@ -172,7 +254,7 @@ class VertexAIStrategy implements RequestHandlerStrategy {
 		if (!ctx.originalBodyBuffer) {
 			return null;
 		}
-		let bodyToModify: any;
+		let bodyToModify: ModelProviderRequestBody;
 		try {
 			bodyToModify = JSON.parse(new TextDecoder().decode(ctx.originalBodyBuffer));
 		} catch (e) {
@@ -202,9 +284,15 @@ class VertexAIStrategy implements RequestHandlerStrategy {
 }
 
 class GeminiOpenAIStrategy implements RequestHandlerStrategy {
-	getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number) { return _getGeminiAuthDetails(c, (ctx.parsedBody as any)?.model, attempt, "Gemini OpenAI"); }
+	private readonly config: AppConfig;
+
+	constructor(config: AppConfig) {
+		this.config = config;
+	}
+
+	getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number) { return _getGeminiAuthDetails(c, ctx.parsedBody?.model ?? null, attempt, "Gemini OpenAI"); }
 	buildTargetUrl(ctx: StrategyContext): URL {
-		const baseUrl = getApiMappings()['/gemini'];
+		const baseUrl = this.config.apiMappings['/gemini'];
 		if (!baseUrl) throw new Response("Gemini base URL for '/gemini' not in API_MAPPINGS.", { status: 503 });
 		let path = ctx.path;
 		if (['/chat/completions', '/embeddings', '/models'].includes(ctx.path)) path = '/v1beta' + ctx.path;
@@ -225,7 +313,11 @@ class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 		try {
 			const body = await res.json();
 			if (body?.data?.length) {
-				body.data.forEach((m: any) => m.id?.startsWith('models/') && (m.id = m.id.slice(7)));
+				body.data.forEach((m: GeminiModel) => {
+					if (m.id?.startsWith('models/')) {
+						m.id = m.id.slice(7);
+					}
+				});
 				const newBody = JSON.stringify(body);
 				const h = new Headers(res.headers);
 				h.delete('Content-Encoding');
@@ -238,10 +330,16 @@ class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 }
 
 class GeminiNativeStrategy implements RequestHandlerStrategy {
+	private readonly config: AppConfig;
+
+	constructor(config: AppConfig) {
+		this.config = config;
+	}
+
 	getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number) { const model = ctx.path.match(/\/models\/([^:]+):/)?.[1] ?? null; return _getGeminiAuthDetails(c, model, attempt, "Gemini Native"); }
 	buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
 		if (!auth.key) throw new Response("Gemini Native requires an API Key.", { status: 500 });
-		const baseUrl = getApiMappings()['/gemini'];
+		const baseUrl = this.config.apiMappings['/gemini'];
 		if (!baseUrl) throw new Response("Gemini base URL for '/gemini' not in API_MAPPINGS.", { status: 503 });
 		const url = new URL(ctx.path, baseUrl);
 		ctx.originalUrl.searchParams.forEach((v, k) => k.toLowerCase() !== 'key' && url.searchParams.set(k, v));
@@ -253,10 +351,16 @@ class GeminiNativeStrategy implements RequestHandlerStrategy {
 }
 
 class GenericProxyStrategy implements RequestHandlerStrategy {
+	private readonly config: AppConfig;
+
+	constructor(config: AppConfig) {
+		this.config = config;
+	}
+
 	getAuthenticationDetails() { return { key: null, source: null, gcpToken: null, gcpProject: null, maxRetries: 1 }; }
 	buildTargetUrl(ctx: StrategyContext): URL {
-		if (!ctx.prefix || !getApiMappings()[ctx.prefix]) throw new Response(`Proxy target for prefix '${ctx.prefix}' not in API_MAPPINGS.`, { status: 503 });
-		const url = new URL(ctx.path, getApiMappings()[ctx.prefix]);
+		if (!ctx.prefix || !this.config.apiMappings[ctx.prefix]) throw new Response(`Proxy target for prefix '${ctx.prefix}' not in API_MAPPINGS.`, { status: 503 });
+		const url = new URL(ctx.path, this.config.apiMappings[ctx.prefix]);
 		ctx.originalUrl.searchParams.forEach((v, k) => url.searchParams.set(k, v));
 		return url;
 	}
@@ -268,7 +372,7 @@ class GenericProxyStrategy implements RequestHandlerStrategy {
 // --- 5. 策略选择器与主处理函数 ---
 // =================================================================================
 
-const determineRequestType = (req: Request, body: ArrayBuffer | null): { type: RequestType, prefix: string | null, path: string, parsedBody?: any } => {
+const determineRequestType = (req: Request, body: ArrayBuffer | null): { type: RequestType, prefix: string | null, path: string, parsedBody?: ModelProviderRequestBody | null } => {
 	const { pathname } = new URL(req.url);
 	if (pathname.startsWith('/vertex/')) {
 		return { type: RequestType.VERTEX_AI, prefix: '/vertex', path: pathname.slice('/vertex'.length) };
@@ -283,21 +387,26 @@ const determineRequestType = (req: Request, body: ArrayBuffer | null): { type: R
 		return { type: RequestType.GENERIC_PROXY, prefix, path };
 	}
 	if (!path.startsWith('/v1beta/')) {
-		let parsedBody: any = null;
+		let parsedBody: ModelProviderRequestBody | null = null;
 		if (body && req.method !== 'GET') try { parsedBody = JSON.parse(new TextDecoder().decode(body)); } catch { /* ignore */ }
 		return { type: RequestType.GEMINI_OPENAI, prefix, path, parsedBody };
 	}
 	return { type: RequestType.GEMINI_NATIVE, prefix, path };
 };
 
+const STRATEGIES: Partial<Record<RequestType, RequestHandlerStrategy>> = {
+	[RequestType.VERTEX_AI]: new VertexAIStrategy(CONFIG, gcpAuthManager.getAuth),
+	[RequestType.GEMINI_OPENAI]: new GeminiOpenAIStrategy(CONFIG),
+	[RequestType.GEMINI_NATIVE]: new GeminiNativeStrategy(CONFIG),
+	[RequestType.GENERIC_PROXY]: new GenericProxyStrategy(CONFIG),
+};
+
 const getStrategy = (type: RequestType): RequestHandlerStrategy => {
-	switch (type) {
-		case RequestType.VERTEX_AI: return new VertexAIStrategy();
-		case RequestType.GEMINI_OPENAI: return new GeminiOpenAIStrategy();
-		case RequestType.GEMINI_NATIVE: return new GeminiNativeStrategy();
-		case RequestType.GENERIC_PROXY: return new GenericProxyStrategy();
-		default: throw new Error(`Unsupported type: ${RequestType[type]}`);
+	const strategy = STRATEGIES[type];
+	if (!strategy) {
+		throw new Error(`Unsupported type: ${RequestType[type]}`);
 	}
+	return strategy;
 };
 
 const handleGenericProxy = async (c: Context): Promise<Response> => {
@@ -321,6 +430,10 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
 				const errorBodyText = await res.text();
 				console.error(`Upstream request to ${targetUrl.hostname} FAILED. Status: ${res.status}. Body: ${errorBodyText}`);
 				lastError = new Response(errorBodyText, { status: res.status, statusText: res.statusText, headers: res.headers });
+				// Stop retrying on client errors (4xx) that are not '429 Too Many Requests'.
+				if (res.status >= 400 && res.status < 500 && res.status !== 429) {
+					break;
+				}
 				if (attempts >= maxRetries) break; else continue;
 			}
 			return strategy.handleResponse ? await strategy.handleResponse(res, context) : res;
