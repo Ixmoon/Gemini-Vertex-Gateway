@@ -2,81 +2,107 @@
 
 ## What is this?
 
-An intelligent API gateway designed for Google Gemini and Vertex AI APIs, aiming to simplify access, authentication, and key management while enhancing security and availability.
+A stateless API gateway for Google Gemini and Vertex AI APIs, configured entirely via **environment variables**. It's designed to simplify access, authentication, and key management while enhancing security and availability.
 
-This gateway acts as a smart relay. Direct your requests intended for Google Gemini or Vertex AI to the gateway's `/gemini` path. Based on your configuration, the gateway automatically handles authentication (including Gemini Key rotation and GCP credential rotation), performs intelligent routing based on the model name, and securely forwards the request to the appropriate Google service.
+This gateway acts as a smart relay. Direct your requests intended for Google services to the paths you configure (e.g., `/gemini` or `/vertex`). Based on environment variable settings, the gateway automatically handles authentication (including Gemini Key rotation and GCP credential rotation), performs intelligent routing based on model names or paths, and securely forwards the requests to the appropriate Google service.
 
-It also provides basic HTTP proxy functionality. You can configure other path prefixes to forward requests to any web service, but this part of the functionality does not include the advanced management features designed for Google LLMs mentioned below.
+It also provides basic HTTP proxy functionality. You can configure other path prefixes to forward requests to any web service.
 
 ## Core Problems Solved (for Google LLM APIs)
 
 *   **Key/Credential Security**: Avoids exposing Google API keys or GCP service account credentials in client-side or application code.
 *   **Simplified Authentication**: Clients only need a unified "trigger key" to access services via the gateway.
-*   **Gemini Key Management**: Addresses quota limits and single-point-of-failure issues by implementing automatic rotation and failure retry for Gemini API Keys via a key pool.
+*   **Gemini Key Management**: Addresses quota limits by implementing automatic rotation and failure retry for Gemini API Keys via a key pool.
 *   **Vertex AI Credential Management**: Simplifies Vertex AI authentication through automatic rotation of GCP service account credentials.
-*   **Intelligent Routing**: Automatically routes requests to the Gemini API, Vertex AI endpoints, or uses a specified Fallback Key based on the model name.
+*   **Intelligent Routing**:
+    *   Provides a dedicated `/vertex` path for direct access to Vertex AI.
+    *   Adapts automatically to **Gemini Native API** or **OpenAI-Compatible API** requests via the `/gemini` path.
+    *   Routes requests to a specified **Fallback Key** based on the model name.
 
-## Core Advantages (Targeting the `/gemini` Endpoint)
+## Core Advantages
 
-This project offers the following core advantages for Google Gemini and Vertex AI API calls made via the `/gemini` path:
-
-*   **Model-Driven Intelligent Routing**:
-	*   Automatically identifies and routes requests to **Vertex AI** endpoints based on the model name, authenticating with rotated GCP service account credentials.
-	*   Routes requests to a designated **Fallback Key** based on the model name. This is often used to direct specific requests (e.g., using paid models, models requiring special permissions) to a dedicated key, allowing the key pool to handle other requests (e.g., using free models), thus enabling cost optimization or fine-grained access control.
-*   **Gemini Key Rotation & Retry**: For requests targeting the Gemini API (when not matched by Fallback Key or Vertex AI routing rules), automatically selects an API Key from the "Pool Keys" in rotation and attempts retries with other keys from the pool upon failure, according to configuration.
-*   **Enhanced Security**: Securely stores actual Google API keys and GCP service account credentials on the backend (Deno KV).
-*   **Unified Entry Point & Simplified Authentication**: Uses `/gemini` as the unified path for accessing Google LLM services, requiring clients only to manage and use simple "trigger keys".
-*   **Web Configuration**: Provides an intuitive Web UI ([`/manage`](src/manage.html:1)) for configuring policies.
-
-**(Secondary Functionality)**: Supports basic request forwarding to any HTTP/S service by configuring **other API Path Mappings**. This functionality **does not provide** the advanced features like key rotation, credential rotation, or model routing mentioned above.
+*   **OpenAI API Compatibility Layer**: Use clients compatible with OpenAI's `/v1/chat/completions` interface to access Gemini models directly through the `/gemini` path.
+*   **Dedicated Vertex AI Endpoint**: Offers a clear and dedicated `/vertex` path for all Vertex AI requests.
+*   **Model-Driven Routing**:
+    *   Routes requests to a designated **Fallback Key** based on the model name. This is often used to direct specific requests (e.g., for paid models) to a dedicated key for cost optimization or fine-grained access control.
+*   **Gemini Key Rotation & Retry**: For requests to the Gemini API, automatically selects an API Key from the "Pool Keys" in rotation and attempts retries with other keys upon failure.
+*   **Enhanced Security**: Securely injects your actual Google API keys and GCP service account credentials via environment variables on the backend.
+*   **Unified Entry Point & Simplified Authentication**: Uses `/gemini`, `/vertex`, etc., as unified paths for Google LLM services, requiring clients only to manage simple "trigger keys".
+*   **Stateless & Easy Deployment**: Requires no database or external storage. All configuration comes from environment variables, greatly simplifying deployment and scaling.
 
 ## Who is it for?
 
 *   Developers calling Google Gemini or Vertex AI APIs.
 *   Individuals or teams seeking to simplify and secure their Google API key and GCP credential management.
 *   Users looking to improve the stability and availability of their Google LLM API calls.
-*   Users who prefer configuring complex calling strategies through an intuitive web interface.
+*   Users who prefer configuring deployments via environment variables.
 
 ## Quick Deployment (Recommended: Deno Deploy)
 
 Deploying to Deno Deploy is the simplest method.
 
-1.  **Prepare Code**: Host the project code in a GitHub repository.
+1.  **Prepare Code**: Fork this project or host the code in your own GitHub repository.
 2.  **Visit Deno Deploy**: Go to the [Deno Deploy website](https://deno.com/deploy) and log in with GitHub.
 3.  **Create Project**: Click "New Project".
 4.  **Link Repository**: Select the GitHub repository containing the gateway code.
 5.  **Set Entry Point**: Specify the entry point file as `src/deno_index.ts`.
-6.  **Deploy**: Click "Link" / "Deploy".
-7.  **Get Your URL**: Note down your deployment URL (e.g., `https://<your-project-name>.deno.dev`).
+6.  **Add Environment Variables**: In the "Environment Variables" section, add the variables described in the "How to Configure" section below.
+7.  **Deploy**: Click "Link" / "Deploy".
+8.  **Get Your URL**: Note down your deployment URL (e.g., `https://<your-project-name>.deno.dev`).
 
 *Note: Deno Deploy's free tier has resource limitations.*
 
-## How to Configure (Using the `/manage` Webpage)
+## How to Configure (Via Environment Variables)
 
-Access `https://<your-unique-url>/manage` after deployment to configure.
+Configure all gateway features by setting environment variables.
 
-1.  **Access & Login**: Set an admin password (min. 8 characters) on first access.
-2.  **Core Configuration Options Explained**:
-	*   **API Path Mappings**:
-		*   **`/gemini` (Required)**: The entry point for advanced Google LLM features. You **must add** a mapping with the prefix `/gemini`, targeting the Google API base address (e.g., `https://generativelanguage.googleapis.com`). Requests to `<your-url>/gemini/...` will be intelligently processed by the gateway.
-		*   **Other Prefixes (Optional)**: Add other prefixes to configure basic HTTP proxy forwarding to any URL; advanced features **do not apply**.
-	*   **Trigger Keys**: **(Required)** Add the "passcodes" clients need to call the gateway (any path).
-	*   **Pool Keys**: **(For `/gemini` Gemini Requests)** Store Google API keys here. Used **only** for `/gemini` requests targeting the Gemini API (when the model doesn't match Fallback or Vertex rules). Supports key rotation and retry.
-	*   **Fallback Key & Fallback Models**: **(For specific `/gemini` Model Requests)** Set a dedicated Google API key and specify which model names (requested via `/gemini`) should be **routed directly to use this key**. Often used to direct requests for paid or specific-capability models to this key, complementing the pool key strategy. This rule takes precedence over the Pool Keys.
-	*   **Vertex AI Model List & GCP Settings**: **(For `/gemini` Vertex AI Requests)** Add model names that need routing to Vertex AI, and configure GCP service account credentials (multiple can be added for rotation). When a `/gemini` request's model is in this list, it will be authenticated using GCP credentials and **routed to Vertex AI**.
-	*   **API Retry Limit**: **(For `/gemini` Gemini Pool Keys)** Sets the maximum number of *different* keys from the Pool Keys to try when a Gemini API call (using the pool) fails.
-3.  **Save Configuration**: Always click the "Save" button for the respective section after making changes.
+*   **`API_MAPPINGS` (Required)**: Defines mappings from path prefixes to target URLs.
+    *   **Format**: `/<prefix1>:<target_url1>,/<prefix2>:<target_url2>`
+    *   **Example**: `/gemini:https://generativelanguage.googleapis.com,/other:https://api.example.com`
+    *   **Note**: Must include a mapping for Gemini. `/vertex` is a special built-in path and does not need to be configured here.
+
+*   **`TRIGGER_KEYS` (Required)**: The "passcodes" clients need to call the gateway. Multiple keys can be set.
+    *   **Format**: `<key1>,<key2>,...`
+    *   **Example**: `my_secret_key,another_key`
+
+*   **`POOL_KEYS` (For Gemini)**: A pool of Google API keys for Gemini API rotation and retries.
+    *   **Format**: `<g_api_key1>,<g_api_key2>,...`
+
+*   **`FALLBACK_KEY` & `FALLBACK_MODELS` (Optional)**: Set a dedicated Google API key and specify which model requests should be routed directly to it.
+    *   `FALLBACK_KEY`: **Format**: `<single_g_api_key>`
+    *   `FALLBACK_MODELS`: **Format**: `<model1>,<model2>,...` (e.g., `gemini-pro,gemini-ultra`)
+
+*   **`GCP_CREDENTIALS` (For Vertex AI)**: Contains one or more GCP service account credentials (in JSON format).
+    *   **Format**: `[{...gcp_cred_json...}]` (for a single credential) or `[[{...cred1...},{...cred2...}]]` (for an array of multiple credentials).
+    *   **It is strongly recommended** to set this as a "Secret" type environment variable on platforms like Deno Deploy.
+
+*   **`GCP_DEFAULT_LOCATION` (For Vertex AI)**: The region for your GCP project.
+    *   **Format**: A string, e.g., `us-central1` or `global`.
+    *   **Default**: `global`
+
+*   **`API_RETRY_LIMIT` (Optional)**: The maximum number of different keys/credentials to try from the pool upon failure.
+    *   **Format**: A numeric string, e.g., `3`.
+    *   **Default**: `1`
 
 ## How to Call APIs
 
-### Calling Google Gemini / Vertex AI (via `/gemini`)
+### Calling Vertex AI (via `/vertex`)
 
-Leverage the gateway's intelligent features by making requests via the `/gemini` path:
-
-1.  **Construct URL**: `https://<your-unique-url>/gemini/<original-google-api-path>`
-	*   *Example (Gemini)*: `https://<your-url>/gemini/v1beta/models/gemini-pro:generateContent`
+1.  **Construct URL**: `https://<your-unique-url>/vertex/<original-vertex-ai-api-path>`
+    *   *Example*: `https://<your-url>/vertex/v1/chat/completions` (using OpenAI compatibility mode)
 2.  **Add Authentication**: Include `Authorization: Bearer <your_trigger_key>` in the request headers.
-3.  **Send Request**: The gateway handles authentication and routing based on the model and configuration.
+3.  **Send Request**: The gateway will authenticate using rotated GCP credentials and forward the request.
+
+### Calling Google Gemini (via `/gemini`)
+
+This endpoint intelligently handles two types of requests:
+
+*   **Native API Requests**: Paths matching `/v1beta/**`.
+    *   **URL**: `https://<your-url>/gemini/v1beta/models/gemini-pro:generateContent`
+*   **OpenAI-Compatible Requests**: Paths matching `/v1/**` or other non-native paths.
+    *   **URL**: `https://<your-url>/gemini/v1/chat/completions`
+
+**Authentication**: Include `Authorization: Bearer <your_trigger_key>` in the request headers. The gateway will handle authentication based on your model and key pool configuration.
 
 ### Calling Other Services (via Custom Prefix)
 
@@ -87,11 +113,15 @@ Leverage the gateway's intelligent features by making requests via the `/gemini`
 ## (Optional) Running Locally
 
 1.  **Install Deno**: See [Deno's official website](https://deno.land/).
-2.  **Run**:
-	```bash
-	deno run --allow-net --allow-read --allow-env --allow-write ./src/deno_index.ts
-	```
-3.  **Access**: Service runs at `http://localhost:8080`. Config: `http://localhost:8080/manage`. API calls: `http://localhost:8080/<prefix>/...`.
+2.  **Create a `.env` file**: Create a `.env` file in the project root and populate it with the environment variables described above.
+3.  **Load Environment Variables and Run**:
+    ```bash
+    # You may need to install deno_dotenv first
+    deno install -A -r https://deno.land/x/dotenv/load.ts
+    # Run the server
+    deno run --allow-net --allow-env ./src/deno_index.ts
+    ```
+4.  **Access**: The service runs at `http://localhost:8080` by default.
 
 ---
 
