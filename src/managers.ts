@@ -31,7 +31,6 @@ class ConfigManager {
     private config: AppConfig | null = null;
 
     private initialize(): AppConfig {
-        console.log("[Lazy Init] Initializing configuration...");
         const newConfig: AppConfig = {
             triggerKeys: getSetFromEnv(ENV_KEYS.TRIGGER_KEYS),
             poolKeys: Array.from(getSetFromEnv(ENV_KEYS.POOL_KEYS)),
@@ -63,7 +62,6 @@ class ConfigManager {
             })(),
         };
         this.config = newConfig;
-        console.log("[Lazy Init] Configuration initialized.");
         return this.config;
     }
 

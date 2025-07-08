@@ -8,7 +8,7 @@ const getRandomElement = <T>(arr: T[]): T | undefined => {
 };
 
 // =================================================================================
-// --- 2. 类型定义与常量 ---
+// --- 1. 类型定义与常量 ---
 // =================================================================================
 
 interface GcpCredentials { type: string; project_id: string; private_key_id: string; private_key: string; client_email: string; client_id?: string; }
@@ -28,7 +28,7 @@ interface GeminiModel { id: string; }
 interface StrategyContext { originalUrl: URL; originalRequest: Request; path: string; prefix: string | null; }
 
 // =================================================================================
-// --- 3. 请求处理策略 (Strategy Pattern) ---
+// --- 2. 请求处理策略 (Strategy Pattern) ---
 // =================================================================================
 
 interface RequestHandlerStrategy {
@@ -214,7 +214,7 @@ class GenericProxyStrategy implements RequestHandlerStrategy {
 }
 
 // =================================================================================
-// --- 4. 懒加载管理器 ---
+// --- 3. 懒加载管理器 ---
 // =================================================================================
 
 const isValidGcpCred = (cred: unknown): cred is GcpCredentials => {
@@ -392,7 +392,7 @@ const _getGeminiAuthDetails = (c: Context, model: string | null, attempt: number
 };
 
 // =================================================================================
-// --- 5. 策略选择器与主处理函数 ---
+// --- 4. 策略选择器与主处理函数 ---
 // =================================================================================
 
 const determineRequestType = (req: Request): { type: RequestType, prefix: string | null, path: string } => {
@@ -499,7 +499,7 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
 };
 
 // =================================================================================
-// --- 6. Hono 服务器设置与启动 ---
+// --- 5. Hono 服务器设置与启动 ---
 // =================================================================================
 
 const app = new Hono();
@@ -511,5 +511,5 @@ app.onError((err: Error, c: Context) => {
 	if (err instanceof Response) return err;
 	return c.json({ error: `Internal Error: ${err.message}` }, 500);
 });
-Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8080", 10) }, app.fetch);
-console.log(`Server running on http://localhost:${Deno.env.get("PORT") || "8080"}`);
+Deno.serve(app.fetch);
+console.log(`Gateway Running`);
