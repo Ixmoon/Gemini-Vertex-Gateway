@@ -417,35 +417,65 @@ const determineRequestType = (req: Request): { type: RequestType, prefix: string
 
 
 const handleGenericProxy = async (c: Context): Promise<Response> => {
-	const req = c.req.raw;
-	const { type, ...details } = determineRequestType(req);
+	const originalReq = c.req.raw;
+	const { type, ...details } = determineRequestType(originalReq);
 
 	if (type === RequestType.UNKNOWN) {
-		return c.json({ error: `No route for path: ${new URL(req.url).pathname}` }, 404);
+		return c.json({ error: `No route for path: ${new URL(originalReq.url).pathname}` }, 404);
 	}
 
 	try {
 		const strategy = await strategyManager.get(type);
-		const context: StrategyContext = {
-			originalUrl: new URL(req.url),
-			originalRequest: req,
-			...details
-		};
+		
+		// --- Body Caching Logic for Retries ---
+		let bodyBufferPromise: Promise<ArrayBuffer | null> | null = null;
+		let requestForFirstAttempt = originalReq;
+
+		if (originalReq.body && (originalReq.method === 'POST' || originalReq.method === 'PUT' || originalReq.method === 'PATCH')) {
+			const [stream1, stream2] = originalReq.body.tee();
+			requestForFirstAttempt = new Request(originalReq, { body: stream1 });
+			bodyBufferPromise = (async () => {
+				try {
+					return await new Response(stream2).arrayBuffer();
+				} catch (e) {
+					console.error("Error buffering request body:", e);
+					return null; // Return null if buffering fails
+				}
+			})();
+		}
+		// --- End of Body Caching Logic ---
 
 		let attempts = 0, maxRetries = 1, lastError: Response | null = null;
 
 		while (attempts < maxRetries) {
 			attempts++;
 			try {
-				// The body processing can be independent of auth details for all strategies now.
-				// We get auth details first, which might depend on the body, but we process the body stream later.
+				let currentRequest = requestForFirstAttempt;
+				// For retries, use the buffered body
+				if (attempts > 1) {
+					if (!bodyBufferPromise) {
+						// This should not happen if the first attempt had a body, but as a safeguard:
+						throw new Error("Cannot retry request: original body was not buffered.");
+					}
+					const bodyBuffer = await bodyBufferPromise;
+					if (bodyBuffer === null) {
+						throw new Error("Cannot retry request: body buffering failed.");
+					}
+					currentRequest = new Request(originalReq, { body: bodyBuffer });
+				}
+
+				const context: StrategyContext = {
+					originalUrl: new URL(currentRequest.url),
+					originalRequest: currentRequest,
+					...details
+				};
+
 				const auth = await strategy.getAuthenticationDetails(c, context, attempts);
 				
 				if (attempts === 1) {
 					maxRetries = auth.maxRetries;
 				}
 
-				// Parallelize fetching target URL/body/headers
 				const [targetUrl, targetBody, targetHeaders] = await Promise.all([
 					Promise.resolve(strategy.buildTargetUrl(context, auth)),
 					Promise.resolve(strategy.processRequestBody(context)),
@@ -453,10 +483,10 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
 				]);
 
 				const res = await fetch(targetUrl, {
-					method: req.method,
+					method: currentRequest.method,
 					headers: targetHeaders,
 					body: targetBody,
-					signal: req.signal,
+					signal: currentRequest.signal,
 				});
 
 				if (!res.ok) {
@@ -464,23 +494,25 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
 					console.error(`Upstream request to ${targetUrl.hostname} FAILED. Status: ${res.status}. Body: ${errorBodyText}`);
 					lastError = new Response(errorBodyText, { status: res.status, statusText: res.statusText, headers: res.headers });
 					if (res.status >= 400 && res.status < 500 && res.status !== 429) {
-						break; // Don't retry on client errors like 400 or 403
+						break;
 					}
 					if (attempts >= maxRetries) break; else continue;
 				}
-
-				return strategy.handleResponse ? await strategy.handleResponse(res, context) : res;
+				
+				const finalContext: StrategyContext = {
+					originalUrl: new URL(originalReq.url),
+					originalRequest: originalReq,
+					...details
+				};
+				return strategy.handleResponse ? await strategy.handleResponse(res, finalContext) : res;
 
 			} catch (error) {
 				if (error instanceof Response) {
-					lastError = error; // It's already a response, no need to clone
-					// Ensure body is consumed to prevent resource leaks
+					lastError = error;
 					if (error.body && !error.bodyUsed) await error.body.cancel();
-					// Break on client-side errors thrown as responses
 					if (error.status >= 400 && error.status < 500) break;
 					if (attempts >= maxRetries) break; else continue;
 				}
-				// Re-throw non-Response errors to be caught by the outer catch block
 				throw error;
 			}
 		}
