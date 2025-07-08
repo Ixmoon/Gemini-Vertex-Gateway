@@ -238,7 +238,6 @@ class GcpAuthManager {
     private initPromise: Promise<GcpAuth> | null = null;
 
     private initialize(): GcpAuth {
-        console.log("[Lazy Init] Initializing GCP Auth Manager...");
         const config = configManager.get();
         const authInstanceCache = new Map<string, GoogleAuth>();
         let credentials: GcpCredentials[] = [];
@@ -286,7 +285,6 @@ class GcpAuthManager {
         };
 
         this.authInstance = { getAuth };
-        console.log("[Lazy Init] GCP Auth Manager initialized.");
         return this.authInstance;
     }
 
@@ -321,7 +319,6 @@ class StrategyManager {
 
         const initPromise = (async (): Promise<RequestHandlerStrategy> => {
             try {
-                console.log(`[Lazy Init] Initializing strategy for ${RequestType[type]}...`);
                 const config = configManager.get();
                 let strategy: RequestHandlerStrategy;
 
@@ -345,7 +342,6 @@ class StrategyManager {
                 }
 
                 this.strategyCache[type] = strategy;
-                console.log(`[Lazy Init] Strategy for ${RequestType[type]} initialized.`);
                 return strategy;
             } finally {
                 // Clean up the promise from the map once it's settled.
