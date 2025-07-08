@@ -1,41 +1,11 @@
 import { Hono, Context } from "hono";
 import { GoogleAuth } from "google-auth-library";
-
-// =================================================================================
-// --- 1. 配置模块 (从环境变量读取) ---
-// =================================================================================
-const ENV_KEYS = {
-	TRIGGER_KEYS: "TRIGGER_KEYS",
-	POOL_KEYS: "POOL_KEYS",
-	FALLBACK_KEY: "FALLBACK_KEY",
-	FALLBACK_MODELS: "FALLBACK_MODELS",
-	API_RETRY_LIMIT: "API_RETRY_LIMIT",
-	GCP_CREDENTIALS: "GCP_CREDENTIALS",
-	GCP_DEFAULT_LOCATION: "GCP_DEFAULT_LOCATION",
-	API_MAPPINGS: "API_MAPPINGS",
-};
-
-const getSetFromEnv = (varName: string): Set<string> => {
-	const val = Deno.env.get(varName);
-	return val ? new Set(val.split(',').map(s => s.trim()).filter(Boolean)) : new Set();
-};
+import { AppConfig, configManager } from "./managers.ts";
 
 const getRandomElement = <T>(arr: T[]): T | undefined => {
 	if (arr.length === 0) return undefined;
 	return arr[Math.floor(Math.random() * arr.length)];
 };
-
-// AppConfig interface to break circular dependency
-interface AppConfig {
-    triggerKeys: Set<string>;
-    poolKeys: string[];
-    fallbackKey: string | null;
-    fallbackModels: Set<string>;
-    apiRetryLimit: number;
-    gcpCredentialsString: string | null;
-    gcpDefaultLocation: string;
-    apiMappings: Record<string, string>;
-}
 
 // =================================================================================
 // --- 2. 类型定义与常量 ---
@@ -244,26 +214,11 @@ class GenericProxyStrategy implements RequestHandlerStrategy {
 }
 
 // =================================================================================
-// --- 4. 延迟初始化与核心逻辑 ---
+// --- 4. 懒加载管理器 ---
 // =================================================================================
 
-let CONFIG: AppConfig;
-let gcpAuthManager: { getAuth: () => Promise<{ token: string; projectId: string; } | null>; };
-let STRATEGIES: Partial<Record<RequestType, RequestHandlerStrategy>>;
-
-// Getter functions to access initialized config
-const getTriggerKeys = (): Set<string> => CONFIG.triggerKeys;
-const getPoolKeys = (): string[] => CONFIG.poolKeys;
-const getFallbackKey = (): string | null => CONFIG.fallbackKey;
-const getFallbackModels = (): Set<string> => CONFIG.fallbackModels;
-const getApiRetryLimit = (): number => CONFIG.apiRetryLimit;
-const getGcpCredentialsString = (): string | null => CONFIG.gcpCredentialsString;
-const getApiMappings = (): Record<string, string> => CONFIG.apiMappings;
-
 const isValidGcpCred = (cred: unknown): cred is GcpCredentials => {
-	if (typeof cred !== 'object' || cred === null) {
-		return false;
-	}
+	if (typeof cred !== 'object' || cred === null) return false;
 	const maybeCred = cred as Record<string, unknown>;
 	return (
 		maybeCred.type === 'service_account' &&
@@ -273,107 +228,130 @@ const isValidGcpCred = (cred: unknown): cred is GcpCredentials => {
 	);
 };
 
-const initializeDependencies = async () => {
-	CONFIG = {
-		triggerKeys: getSetFromEnv(ENV_KEYS.TRIGGER_KEYS),
-		poolKeys: Array.from(getSetFromEnv(ENV_KEYS.POOL_KEYS)),
-		fallbackKey: Deno.env.get(ENV_KEYS.FALLBACK_KEY) || null,
-		fallbackModels: getSetFromEnv(ENV_KEYS.FALLBACK_MODELS),
-		apiRetryLimit: (() => {
-			const limit = parseInt(Deno.env.get(ENV_KEYS.API_RETRY_LIMIT) || "1", 10);
-			return isNaN(limit) || limit < 1 ? 1 : limit;
-		})(),
-		gcpCredentialsString: Deno.env.get(ENV_KEYS.GCP_CREDENTIALS) || null,
-		gcpDefaultLocation: Deno.env.get(ENV_KEYS.GCP_DEFAULT_LOCATION) || "global",
-		apiMappings: (() => {
-			const mappings: Record<string, string> = {};
-			const raw = Deno.env.get(ENV_KEYS.API_MAPPINGS);
-			if (raw) {
-				raw.split(',').forEach(pair => {
-					const parts = pair.trim().match(/^(\/.*?):(.+)$/);
-					if (parts && parts.length === 3) {
-						try {
-							new URL(parts[2]);
-							mappings[parts[1]] = parts[2];
-						} catch {
-							console.warn(`[Config] Invalid URL in API_MAPPINGS for prefix "${parts[1]}"`);
-						}
-					}
-				});
-			}
-			return mappings;
-		})(),
-	};
+// --- GCP Auth Manager (Lazy Loaded) ---
+interface GcpAuth {
+    getAuth: () => Promise<{ token: string; projectId: string; } | null>;
+}
 
-	gcpAuthManager = (() => {
-		const authInstanceCache = new Map<string, GoogleAuth>();
-		let credentials: GcpCredentials[] = [];
+class GcpAuthManager {
+    private authInstance: GcpAuth | null = null;
+    private initPromise: Promise<GcpAuth> | null = null;
 
-		try {
-			const credsStr = getGcpCredentialsString();
-			if (credsStr) {
-				const parsed = JSON.parse(credsStr);
-				credentials = (Array.isArray(parsed) ? parsed : [parsed]).filter(isValidGcpCred);
-			}
-			if (credentials.length === 0) {
-				console.warn("[GCP] No valid GCP credentials found in GCP_CREDENTIALS.");
-			}
-		} catch (e) {
-			console.error("[GCP] Failed to parse GCP_CREDENTIALS on startup:", e);
-		}
+    private initialize(): GcpAuth {
+        console.log("[Lazy Init] Initializing GCP Auth Manager...");
+        const config = configManager.get();
+        const authInstanceCache = new Map<string, GoogleAuth>();
+        let credentials: GcpCredentials[] = [];
 
-		const getAuthInstance = (credential: GcpCredentials): GoogleAuth => {
-			if (!authInstanceCache.has(credential.client_email)) {
-				const newAuthInstance = new GoogleAuth({
-					credentials: credential,
-					scopes: ["https://www.googleapis.com/auth/cloud-platform"]
-				});
-				authInstanceCache.set(credential.client_email, newAuthInstance);
-			}
-			return authInstanceCache.get(credential.client_email)!;
-		};
+        try {
+            const credsStr = config.gcpCredentialsString;
+            if (credsStr) {
+                const parsed = JSON.parse(credsStr);
+                credentials = (Array.isArray(parsed) ? parsed : [parsed]).filter(isValidGcpCred);
+            }
+            if (credentials.length === 0) {
+                console.warn("[GCP] No valid GCP credentials found in GCP_CREDENTIALS.");
+            }
+        } catch (e) {
+            console.error("[GCP] Failed to parse GCP_CREDENTIALS on startup:", e);
+        }
 
-		const getAuth = async (): Promise<{ token: string; projectId: string } | null> => {
-			if (credentials.length === 0) return null;
-			const selectedCredential = getRandomElement(credentials);
-			if (!selectedCredential) return null;
+        const getAuthInstance = (credential: GcpCredentials): GoogleAuth => {
+            if (!authInstanceCache.has(credential.client_email)) {
+                authInstanceCache.set(credential.client_email, new GoogleAuth({
+                    credentials: credential,
+                    scopes: ["https://www.googleapis.com/auth/cloud-platform"]
+                }));
+            }
+            return authInstanceCache.get(credential.client_email)!;
+        };
 
-			try {
-				const auth = getAuthInstance(selectedCredential);
-				const token = await auth.getAccessToken();
-				if (!token) {
-					console.error(`[GCP] Failed to get Access Token for project: ${selectedCredential.project_id}`);
-					return null;
-				}
-				return { token, projectId: selectedCredential.project_id };
-			} catch (error) {
-				console.error(`[GCP] Error during token acquisition for project ${selectedCredential.project_id}:`, error);
-				return null;
-			}
-		};
+        const getAuth = async (): Promise<{ token: string; projectId: string } | null> => {
+            if (credentials.length === 0) return null;
+            const selectedCredential = getRandomElement(credentials);
+            if (!selectedCredential) return null;
 
-		return { getAuth };
-	})();
+            try {
+                const auth = getAuthInstance(selectedCredential);
+                const token = await auth.getAccessToken();
+                if (!token) {
+                    console.error(`[GCP] Failed to get Access Token for project: ${selectedCredential.project_id}`);
+                    return null;
+                }
+                return { token, projectId: selectedCredential.project_id };
+            } catch (error) {
+                console.error(`[GCP] Error during token acquisition for project ${selectedCredential.project_id}:`, error);
+                return null;
+            }
+        };
 
-	STRATEGIES = {
-		[RequestType.VERTEX_AI]: new VertexAIStrategy(CONFIG, gcpAuthManager.getAuth),
-		[RequestType.GEMINI_OPENAI]: new GeminiOpenAIStrategy(CONFIG),
-		[RequestType.GEMINI_NATIVE]: new GeminiNativeStrategy(CONFIG),
-		[RequestType.GENERIC_PROXY]: new GenericProxyStrategy(CONFIG),
-	};
-};
+        this.authInstance = { getAuth };
+        console.log("[Lazy Init] GCP Auth Manager initialized.");
+        return this.authInstance;
+    }
 
-const initializationPromise = initializeDependencies();
+    public get(): Promise<GcpAuth> {
+        if (this.authInstance) return Promise.resolve(this.authInstance);
+        if (!this.initPromise) {
+            // Wrap initialize in a promise to handle concurrent requests during initialization
+            this.initPromise = new Promise((resolve) => {
+                const instance = this.initialize();
+                resolve(instance);
+            });
+        }
+        return this.initPromise;
+    }
+}
+const gcpAuthManager = new GcpAuthManager();
+
+
+// --- Strategy Manager (Lazy Loaded) ---
+class StrategyManager {
+    private strategyCache: Partial<Record<RequestType, RequestHandlerStrategy>> = {};
+
+    public async get(type: RequestType): Promise<RequestHandlerStrategy> {
+        if (this.strategyCache[type]) {
+            return this.strategyCache[type]!;
+        }
+
+        console.log(`[Lazy Init] Initializing strategy for ${RequestType[type]}...`);
+        const config = configManager.get();
+        let strategy: RequestHandlerStrategy;
+
+        switch (type) {
+            case RequestType.VERTEX_AI: {
+                const gcpAuth = await gcpAuthManager.get();
+                strategy = new VertexAIStrategy(config, gcpAuth.getAuth);
+                break;
+            }
+            case RequestType.GEMINI_OPENAI:
+                strategy = new GeminiOpenAIStrategy(config);
+                break;
+            case RequestType.GEMINI_NATIVE:
+                strategy = new GeminiNativeStrategy(config);
+                break;
+            case RequestType.GENERIC_PROXY:
+                strategy = new GenericProxyStrategy(config);
+                break;
+            default:
+                throw new Error(`Unsupported strategy type: ${RequestType[type]}`);
+        }
+
+        this.strategyCache[type] = strategy;
+        console.log(`[Lazy Init] Strategy for ${RequestType[type]} initialized.`);
+        return strategy;
+    }
+}
+const strategyManager = new StrategyManager();
 
 const getApiKeyForRequest = (userKey: string | null, model: string | null): ApiKeyResult | null => {
 	if (!userKey) return null;
-	if (!getTriggerKeys().has(userKey)) return { key: userKey, source: 'user' };
-	if (model && getFallbackModels().has(model.trim())) {
-		const fbKey = getFallbackKey();
-		if (fbKey) return { key: fbKey, source: 'fallback' };
+	const config = configManager.get();
+	if (!config.triggerKeys.has(userKey)) return { key: userKey, source: 'user' };
+	if (model && config.fallbackModels.has(model.trim())) {
+		if (config.fallbackKey) return { key: config.fallbackKey, source: 'fallback' };
 	}
-	const pool = getPoolKeys();
-	const randomPoolKey = getRandomElement(pool);
+	const randomPoolKey = getRandomElement(config.poolKeys);
 	if (randomPoolKey) return { key: randomPoolKey, source: 'pool' };
 	return null;
 };
@@ -386,20 +364,20 @@ const buildBaseProxyHeaders = (h: Headers): Headers => { const n = new Headers(h
 
 const _getGeminiAuthDetails = (c: Context, model: string | null, attempt: number, name: string): AuthenticationDetails => {
 	const userApiKey = getApiKeyFromReq(c);
+	const config = configManager.get();
 	const isModels = new URL(c.req.url).pathname.endsWith('/models');
 	let result: ApiKeyResult | null = null;
 	if (attempt === 1) {
 		result = getApiKeyForRequest(userApiKey, model);
 		if (!result && !isModels) throw new Response(`No valid API key (${name})`, { status: 401 });
-	} else if (userApiKey && getTriggerKeys().has(userApiKey)) {
-		const pool = getPoolKeys();
-		const randomPoolKey = getRandomElement(pool);
+	} else if (userApiKey && config.triggerKeys.has(userApiKey)) {
+		const randomPoolKey = getRandomElement(config.poolKeys);
 		if (randomPoolKey) result = { key: randomPoolKey, source: 'pool' };
 		else if (!isModels) throw new Response(`Key pool exhausted (${name})`, { status: 503 });
 	} else if (attempt > 1 && !isModels) {
 		throw new Response(`Request failed, non-trigger key won't be retried (${name})`, { status: 503 });
 	}
-	return { key: result?.key || null, source: result?.source || null, gcpToken: null, gcpProject: null, maxRetries: result?.source === 'pool' ? getApiRetryLimit() : 1 };
+	return { key: result?.key || null, source: result?.source || null, gcpToken: null, gcpProject: null, maxRetries: result?.source === 'pool' ? config.apiRetryLimit : 1 };
 };
 
 // =================================================================================
@@ -411,7 +389,7 @@ const determineRequestType = (req: Request): { type: RequestType, prefix: string
 	if (pathname.startsWith('/vertex/')) {
 		return { type: RequestType.VERTEX_AI, prefix: '/vertex', path: pathname.slice('/vertex'.length) };
 	}
-	const mappings = getApiMappings();
+	const mappings = configManager.get().apiMappings;
 	const prefix = Object.keys(mappings).find(p => pathname.startsWith(p));
 	const path = prefix ? pathname.slice(prefix.length) : pathname;
 	if (!prefix) {
@@ -426,17 +404,8 @@ const determineRequestType = (req: Request): { type: RequestType, prefix: string
 	return { type: RequestType.GEMINI_NATIVE, prefix, path };
 };
 
-const getStrategy = (type: RequestType): RequestHandlerStrategy => {
-	const strategy = STRATEGIES[type];
-	if (!strategy) {
-		throw new Error(`Unsupported type: ${RequestType[type]}`);
-	}
-	return strategy;
-};
 
 const handleGenericProxy = async (c: Context): Promise<Response> => {
-	await initializationPromise;
-
 	const req = c.req.raw;
 	const { type, ...details } = determineRequestType(req);
 
@@ -444,76 +413,78 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
 		return c.json({ error: `No route for path: ${new URL(req.url).pathname}` }, 404);
 	}
 
-	const strategy = getStrategy(type);
-	const context: StrategyContext = {
-		originalUrl: new URL(req.url),
-		originalRequest: req,
-		...details
-	};
+	try {
+		const strategy = await strategyManager.get(type);
+		const context: StrategyContext = {
+			originalUrl: new URL(req.url),
+			originalRequest: req,
+			...details
+		};
 
-	let attempts = 0, maxRetries = 1, lastError: Response | null = null;
+		let attempts = 0, maxRetries = 1, lastError: Response | null = null;
 
-	while (attempts < maxRetries) {
-		attempts++;
-		try {
-			let auth: AuthenticationDetails;
-			let targetBody: BodyInit | null;
+		while (attempts < maxRetries) {
+			attempts++;
+			try {
+				// The body processing can be independent of auth details for all strategies now.
+				// We get auth details first, which might depend on the body, but we process the body stream later.
+				const auth = await strategy.getAuthenticationDetails(c, context, attempts);
+				
+				if (attempts === 1) {
+					maxRetries = auth.maxRetries;
+				}
 
-			// For VertexAI, we can parallelize auth and body processing.
-			if (type === RequestType.VERTEX_AI) {
-				const [authResult, bodyResult] = await Promise.all([
-					strategy.getAuthenticationDetails(c, context, attempts),
-					strategy.processRequestBody(context)
+				// Parallelize fetching target URL/body/headers
+				const [targetUrl, targetBody, targetHeaders] = await Promise.all([
+					Promise.resolve(strategy.buildTargetUrl(context, auth)),
+					Promise.resolve(strategy.processRequestBody(context)),
+					Promise.resolve(strategy.buildRequestHeaders(context, auth))
 				]);
-				auth = authResult;
-				targetBody = bodyResult;
-			} else {
-				// For other strategies, execute sequentially due to potential dependencies.
-				auth = await strategy.getAuthenticationDetails(c, context, attempts);
-				targetBody = await Promise.resolve(strategy.processRequestBody(context));
-			}
 
-			if (attempts === 1) {
-				maxRetries = auth.maxRetries;
-			}
-			
-			const targetUrl = await Promise.resolve(strategy.buildTargetUrl(context, auth));
-			const targetHeaders = strategy.buildRequestHeaders(context, auth);
+				const res = await fetch(targetUrl, {
+					method: req.method,
+					headers: targetHeaders,
+					body: targetBody,
+					signal: req.signal,
+				});
 
-			const res = await fetch(targetUrl, {
-				method: req.method,
-				headers: targetHeaders,
-				body: targetBody,
-				signal: req.signal,
-			});
-
-			if (!res.ok) {
-				const errorBodyText = await res.text();
-				console.error(`Upstream request to ${targetUrl.hostname} FAILED. Status: ${res.status}. Body: ${errorBodyText}`);
-				lastError = new Response(errorBodyText, { status: res.status, statusText: res.statusText, headers: res.headers });
-				if (res.status >= 400 && res.status < 500 && res.status !== 429) {
-					break;
+				if (!res.ok) {
+					const errorBodyText = await res.text();
+					console.error(`Upstream request to ${targetUrl.hostname} FAILED. Status: ${res.status}. Body: ${errorBodyText}`);
+					lastError = new Response(errorBodyText, { status: res.status, statusText: res.statusText, headers: res.headers });
+					if (res.status >= 400 && res.status < 500 && res.status !== 429) {
+						break; // Don't retry on client errors like 400 or 403
+					}
+					if (attempts >= maxRetries) break; else continue;
 				}
-				if (attempts >= maxRetries) break; else continue;
-			}
 
-			return strategy.handleResponse ? await strategy.handleResponse(res, context) : res;
+				return strategy.handleResponse ? await strategy.handleResponse(res, context) : res;
 
-		} catch (error) {
-			if (error instanceof Response) {
-				lastError = error.clone();
-				if (error.body) await error.body.cancel();
-				if (attempts >= maxRetries) break; else continue;
-			} else {
-				console.error(`Attempt ${attempts} non-Response error for ${RequestType[type]}:`, error);
-				if (error instanceof Error && error.name === 'AbortError') {
-					return new Response("Client disconnected", { status: 499 });
+			} catch (error) {
+				if (error instanceof Response) {
+					lastError = error; // It's already a response, no need to clone
+					// Ensure body is consumed to prevent resource leaks
+					if (error.body && !error.bodyUsed) await error.body.cancel();
+					// Break on client-side errors thrown as responses
+					if (error.status >= 400 && error.status < 500) break;
+					if (attempts >= maxRetries) break; else continue;
 				}
-				return c.json({ error: `Internal Server Error: ${error instanceof Error ? error.message : "Unknown"}` }, 500);
+				// Re-throw non-Response errors to be caught by the outer catch block
+				throw error;
 			}
 		}
+		return lastError ?? c.json({ error: "Request failed after all retries." }, 502);
+
+	} catch (error) {
+		console.error(`Critical error in handleGenericProxy for ${RequestType[type]}:`, error);
+		if (error instanceof Response) {
+			return error;
+		}
+		if (error instanceof Error && error.name === 'AbortError') {
+			return new Response("Client disconnected", { status: 499 });
+		}
+		return c.json({ error: `Internal Server Error: ${error instanceof Error ? error.message : "Unknown"}` }, 500);
 	}
-	return lastError ?? c.json({ error: "Request failed after all retries." }, 502);
 };
 
 // =================================================================================
