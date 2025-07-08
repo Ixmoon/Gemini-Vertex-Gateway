@@ -305,41 +305,56 @@ class GcpAuthManager {
 const gcpAuthManager = new GcpAuthManager();
 
 
-// --- Strategy Manager (Lazy Loaded) ---
+// --- Strategy Manager (Lazy Loaded & Race-Condition Safe) ---
 class StrategyManager {
     private strategyCache: Partial<Record<RequestType, RequestHandlerStrategy>> = {};
+    private initPromises: Partial<Record<RequestType, Promise<RequestHandlerStrategy>>> = {};
 
-    public async get(type: RequestType): Promise<RequestHandlerStrategy> {
+    public get(type: RequestType): Promise<RequestHandlerStrategy> {
         if (this.strategyCache[type]) {
-            return this.strategyCache[type]!;
+            return Promise.resolve(this.strategyCache[type]!);
         }
 
-        console.log(`[Lazy Init] Initializing strategy for ${RequestType[type]}...`);
-        const config = configManager.get();
-        let strategy: RequestHandlerStrategy;
+        if (this.initPromises[type]) {
+            return this.initPromises[type]!;
+        }
 
-        switch (type) {
-            case RequestType.VERTEX_AI: {
-                const gcpAuth = await gcpAuthManager.get();
-                strategy = new VertexAIStrategy(config, gcpAuth.getAuth);
-                break;
+        const initPromise = (async (): Promise<RequestHandlerStrategy> => {
+            try {
+                console.log(`[Lazy Init] Initializing strategy for ${RequestType[type]}...`);
+                const config = configManager.get();
+                let strategy: RequestHandlerStrategy;
+
+                switch (type) {
+                    case RequestType.VERTEX_AI: {
+                        const gcpAuth = await gcpAuthManager.get();
+                        strategy = new VertexAIStrategy(config, gcpAuth.getAuth);
+                        break;
+                    }
+                    case RequestType.GEMINI_OPENAI:
+                        strategy = new GeminiOpenAIStrategy(config);
+                        break;
+                    case RequestType.GEMINI_NATIVE:
+                        strategy = new GeminiNativeStrategy(config);
+                        break;
+                    case RequestType.GENERIC_PROXY:
+                        strategy = new GenericProxyStrategy(config);
+                        break;
+                    default:
+                        throw new Error(`Unsupported strategy type: ${RequestType[type]}`);
+                }
+
+                this.strategyCache[type] = strategy;
+                console.log(`[Lazy Init] Strategy for ${RequestType[type]} initialized.`);
+                return strategy;
+            } finally {
+                // Clean up the promise from the map once it's settled.
+                delete this.initPromises[type];
             }
-            case RequestType.GEMINI_OPENAI:
-                strategy = new GeminiOpenAIStrategy(config);
-                break;
-            case RequestType.GEMINI_NATIVE:
-                strategy = new GeminiNativeStrategy(config);
-                break;
-            case RequestType.GENERIC_PROXY:
-                strategy = new GenericProxyStrategy(config);
-                break;
-            default:
-                throw new Error(`Unsupported strategy type: ${RequestType[type]}`);
-        }
+        })();
 
-        this.strategyCache[type] = strategy;
-        console.log(`[Lazy Init] Strategy for ${RequestType[type]} initialized.`);
-        return strategy;
+        this.initPromises[type] = initPromise;
+        return initPromise;
     }
 }
 const strategyManager = new StrategyManager();
