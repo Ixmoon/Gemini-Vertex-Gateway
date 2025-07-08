@@ -512,4 +512,3 @@ app.onError((err: Error, c: Context) => {
 	return c.json({ error: `Internal Error: ${err.message}` }, 500);
 });
 Deno.serve(app.fetch);
-console.log(`Gateway Running`);
