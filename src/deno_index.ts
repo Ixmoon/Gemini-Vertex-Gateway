@@ -58,173 +58,8 @@ interface GeminiModel { id: string; }
 interface StrategyContext { originalUrl: URL; originalRequest: Request; path: string; prefix: string | null; }
 
 // =================================================================================
-// --- 3. 延迟初始化 ---
+// --- 3. 请求处理策略 (Strategy Pattern) ---
 // =================================================================================
-
-let CONFIG: AppConfig;
-let gcpAuthManager: { getAuth: () => Promise<{ token: string; projectId: string; } | null>; };
-let STRATEGIES: Partial<Record<RequestType, RequestHandlerStrategy>>;
-
-// Getter functions to access initialized config
-const getTriggerKeys = (): Set<string> => CONFIG.triggerKeys;
-const getPoolKeys = (): string[] => CONFIG.poolKeys;
-const getFallbackKey = (): string | null => CONFIG.fallbackKey;
-const getFallbackModels = (): Set<string> => CONFIG.fallbackModels;
-const getApiRetryLimit = (): number => CONFIG.apiRetryLimit;
-const getGcpCredentialsString = (): string | null => CONFIG.gcpCredentialsString;
-const getApiMappings = (): Record<string, string> => CONFIG.apiMappings;
-
-
-const initializeDependencies = async () => {
-	CONFIG = {
-		triggerKeys: getSetFromEnv(ENV_KEYS.TRIGGER_KEYS),
-		poolKeys: Array.from(getSetFromEnv(ENV_KEYS.POOL_KEYS)),
-		fallbackKey: Deno.env.get(ENV_KEYS.FALLBACK_KEY) || null,
-		fallbackModels: getSetFromEnv(ENV_KEYS.FALLBACK_MODELS),
-		apiRetryLimit: (() => {
-			const limit = parseInt(Deno.env.get(ENV_KEYS.API_RETRY_LIMIT) || "1", 10);
-			return isNaN(limit) || limit < 1 ? 1 : limit;
-		})(),
-		gcpCredentialsString: Deno.env.get(ENV_KEYS.GCP_CREDENTIALS) || null,
-		gcpDefaultLocation: Deno.env.get(ENV_KEYS.GCP_DEFAULT_LOCATION) || "global",
-		apiMappings: (() => {
-			const mappings: Record<string, string> = {};
-			const raw = Deno.env.get(ENV_KEYS.API_MAPPINGS);
-			if (raw) {
-				raw.split(',').forEach(pair => {
-					const parts = pair.trim().match(/^(\/.*?):(.+)$/);
-					if (parts && parts.length === 3) {
-						try {
-							new URL(parts[2]);
-							mappings[parts[1]] = parts[2];
-						} catch {
-							console.warn(`[Config] Invalid URL in API_MAPPINGS for prefix "${parts[1]}"`);
-						}
-					}
-				});
-			}
-			return mappings;
-		})(),
-	};
-
-	gcpAuthManager = (() => {
-		const authInstanceCache = new Map<string, GoogleAuth>();
-		let credentials: GcpCredentials[] = [];
-
-		try {
-			const credsStr = getGcpCredentialsString();
-			if (credsStr) {
-				const parsed = JSON.parse(credsStr);
-				credentials = (Array.isArray(parsed) ? parsed : [parsed]).filter(isValidGcpCred);
-			}
-			if (credentials.length === 0) {
-				console.warn("[GCP] No valid GCP credentials found in GCP_CREDENTIALS.");
-			}
-		} catch (e) {
-			console.error("[GCP] Failed to parse GCP_CREDENTIALS on startup:", e);
-		}
-
-		const getAuthInstance = (credential: GcpCredentials): GoogleAuth => {
-			if (!authInstanceCache.has(credential.client_email)) {
-				const newAuthInstance = new GoogleAuth({
-					credentials: credential,
-					scopes: ["https://www.googleapis.com/auth/cloud-platform"]
-				});
-				authInstanceCache.set(credential.client_email, newAuthInstance);
-			}
-			return authInstanceCache.get(credential.client_email)!;
-		};
-
-		const getAuth = async (): Promise<{ token: string; projectId: string } | null> => {
-			if (credentials.length === 0) return null;
-			const selectedCredential = getRandomElement(credentials);
-			if (!selectedCredential) return null;
-
-			try {
-				const auth = getAuthInstance(selectedCredential);
-				const token = await auth.getAccessToken();
-				if (!token) {
-					console.error(`[GCP] Failed to get Access Token for project: ${selectedCredential.project_id}`);
-					return null;
-				}
-				return { token, projectId: selectedCredential.project_id };
-			} catch (error) {
-				console.error(`[GCP] Error during token acquisition for project ${selectedCredential.project_id}:`, error);
-				return null;
-			}
-		};
-
-		return { getAuth };
-	})();
-
-	STRATEGIES = {
-		[RequestType.VERTEX_AI]: new VertexAIStrategy(CONFIG, gcpAuthManager.getAuth),
-		[RequestType.GEMINI_OPENAI]: new GeminiOpenAIStrategy(CONFIG),
-		[RequestType.GEMINI_NATIVE]: new GeminiNativeStrategy(CONFIG),
-		[RequestType.GENERIC_PROXY]: new GenericProxyStrategy(CONFIG),
-	};
-};
-
-const initializationPromise = initializeDependencies();
-
-
-// =================================================================================
-// --- 3. 核心 API 密钥选择与 GCP 认证逻辑 --- (Continued)
-// =================================================================================
-
-const getApiKeyForRequest = (userKey: string | null, model: string | null): ApiKeyResult | null => {
-	if (!userKey) return null;
-	if (!getTriggerKeys().has(userKey)) return { key: userKey, source: 'user' };
-	if (model && getFallbackModels().has(model.trim())) {
-		const fbKey = getFallbackKey();
-		if (fbKey) return { key: fbKey, source: 'fallback' };
-	}
-	const pool = getPoolKeys();
-	const randomPoolKey = getRandomElement(pool);
-	if (randomPoolKey) return { key: randomPoolKey, source: 'pool' };
-	return null;
-};
-
-const isValidGcpCred = (cred: unknown): cred is GcpCredentials => {
-	if (typeof cred !== 'object' || cred === null) {
-		return false;
-	}
-	const maybeCred = cred as Record<string, unknown>;
-	return (
-		maybeCred.type === 'service_account' &&
-		!!maybeCred.project_id &&
-		!!maybeCred.private_key &&
-		!!maybeCred.client_email
-	);
-};
-
-// =================================================================================
-// --- 4. 请求处理策略 (Strategy Pattern) ---
-// =================================================================================
-
-const getApiKeyFromReq = (c: Context): string | null => {
-	const url = new URL(c.req.url);
-	return url.searchParams.get('key') || c.req.header("Authorization")?.replace(/^bearer\s+/i, '') || c.req.header("x-goog-api-key") || null;
-};
-const buildBaseProxyHeaders = (h: Headers): Headers => { const n = new Headers(h); n.delete('host'); return n; };
-
-const _getGeminiAuthDetails = (c: Context, model: string | null, attempt: number, name: string): AuthenticationDetails => {
-	const userApiKey = getApiKeyFromReq(c);
-	const isModels = new URL(c.req.url).pathname.endsWith('/models');
-	let result: ApiKeyResult | null = null;
-	if (attempt === 1) {
-		result = getApiKeyForRequest(userApiKey, model);
-		if (!result && !isModels) throw new Response(`No valid API key (${name})`, { status: 401 });
-	} else if (userApiKey && getTriggerKeys().has(userApiKey)) {
-		const pool = getPoolKeys();
-		const randomPoolKey = getRandomElement(pool);
-		if (randomPoolKey) result = { key: randomPoolKey, source: 'pool' };
-		else if (!isModels) throw new Response(`Key pool exhausted (${name})`, { status: 503 });
-	} else if (attempt > 1 && !isModels) {
-		throw new Response(`Request failed, non-trigger key won't be retried (${name})`, { status: 503 });
-	}
-	return { key: result?.key || null, source: result?.source || null, gcpToken: null, gcpProject: null, maxRetries: result?.source === 'pool' ? getApiRetryLimit() : 1 };
-};
 
 interface RequestHandlerStrategy {
 	getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails>;
@@ -407,6 +242,165 @@ class GenericProxyStrategy implements RequestHandlerStrategy {
 	buildRequestHeaders(ctx: StrategyContext, _auth: AuthenticationDetails) { return buildBaseProxyHeaders(ctx.originalRequest.headers); }
 	processRequestBody(ctx: StrategyContext) { return ctx.originalRequest.body; }
 }
+
+// =================================================================================
+// --- 4. 延迟初始化与核心逻辑 ---
+// =================================================================================
+
+let CONFIG: AppConfig;
+let gcpAuthManager: { getAuth: () => Promise<{ token: string; projectId: string; } | null>; };
+let STRATEGIES: Partial<Record<RequestType, RequestHandlerStrategy>>;
+
+// Getter functions to access initialized config
+const getTriggerKeys = (): Set<string> => CONFIG.triggerKeys;
+const getPoolKeys = (): string[] => CONFIG.poolKeys;
+const getFallbackKey = (): string | null => CONFIG.fallbackKey;
+const getFallbackModels = (): Set<string> => CONFIG.fallbackModels;
+const getApiRetryLimit = (): number => CONFIG.apiRetryLimit;
+const getGcpCredentialsString = (): string | null => CONFIG.gcpCredentialsString;
+const getApiMappings = (): Record<string, string> => CONFIG.apiMappings;
+
+const isValidGcpCred = (cred: unknown): cred is GcpCredentials => {
+	if (typeof cred !== 'object' || cred === null) {
+		return false;
+	}
+	const maybeCred = cred as Record<string, unknown>;
+	return (
+		maybeCred.type === 'service_account' &&
+		!!maybeCred.project_id &&
+		!!maybeCred.private_key &&
+		!!maybeCred.client_email
+	);
+};
+
+const initializeDependencies = async () => {
+	CONFIG = {
+		triggerKeys: getSetFromEnv(ENV_KEYS.TRIGGER_KEYS),
+		poolKeys: Array.from(getSetFromEnv(ENV_KEYS.POOL_KEYS)),
+		fallbackKey: Deno.env.get(ENV_KEYS.FALLBACK_KEY) || null,
+		fallbackModels: getSetFromEnv(ENV_KEYS.FALLBACK_MODELS),
+		apiRetryLimit: (() => {
+			const limit = parseInt(Deno.env.get(ENV_KEYS.API_RETRY_LIMIT) || "1", 10);
+			return isNaN(limit) || limit < 1 ? 1 : limit;
+		})(),
+		gcpCredentialsString: Deno.env.get(ENV_KEYS.GCP_CREDENTIALS) || null,
+		gcpDefaultLocation: Deno.env.get(ENV_KEYS.GCP_DEFAULT_LOCATION) || "global",
+		apiMappings: (() => {
+			const mappings: Record<string, string> = {};
+			const raw = Deno.env.get(ENV_KEYS.API_MAPPINGS);
+			if (raw) {
+				raw.split(',').forEach(pair => {
+					const parts = pair.trim().match(/^(\/.*?):(.+)$/);
+					if (parts && parts.length === 3) {
+						try {
+							new URL(parts[2]);
+							mappings[parts[1]] = parts[2];
+						} catch {
+							console.warn(`[Config] Invalid URL in API_MAPPINGS for prefix "${parts[1]}"`);
+						}
+					}
+				});
+			}
+			return mappings;
+		})(),
+	};
+
+	gcpAuthManager = (() => {
+		const authInstanceCache = new Map<string, GoogleAuth>();
+		let credentials: GcpCredentials[] = [];
+
+		try {
+			const credsStr = getGcpCredentialsString();
+			if (credsStr) {
+				const parsed = JSON.parse(credsStr);
+				credentials = (Array.isArray(parsed) ? parsed : [parsed]).filter(isValidGcpCred);
+			}
+			if (credentials.length === 0) {
+				console.warn("[GCP] No valid GCP credentials found in GCP_CREDENTIALS.");
+			}
+		} catch (e) {
+			console.error("[GCP] Failed to parse GCP_CREDENTIALS on startup:", e);
+		}
+
+		const getAuthInstance = (credential: GcpCredentials): GoogleAuth => {
+			if (!authInstanceCache.has(credential.client_email)) {
+				const newAuthInstance = new GoogleAuth({
+					credentials: credential,
+					scopes: ["https://www.googleapis.com/auth/cloud-platform"]
+				});
+				authInstanceCache.set(credential.client_email, newAuthInstance);
+			}
+			return authInstanceCache.get(credential.client_email)!;
+		};
+
+		const getAuth = async (): Promise<{ token: string; projectId: string } | null> => {
+			if (credentials.length === 0) return null;
+			const selectedCredential = getRandomElement(credentials);
+			if (!selectedCredential) return null;
+
+			try {
+				const auth = getAuthInstance(selectedCredential);
+				const token = await auth.getAccessToken();
+				if (!token) {
+					console.error(`[GCP] Failed to get Access Token for project: ${selectedCredential.project_id}`);
+					return null;
+				}
+				return { token, projectId: selectedCredential.project_id };
+			} catch (error) {
+				console.error(`[GCP] Error during token acquisition for project ${selectedCredential.project_id}:`, error);
+				return null;
+			}
+		};
+
+		return { getAuth };
+	})();
+
+	STRATEGIES = {
+		[RequestType.VERTEX_AI]: new VertexAIStrategy(CONFIG, gcpAuthManager.getAuth),
+		[RequestType.GEMINI_OPENAI]: new GeminiOpenAIStrategy(CONFIG),
+		[RequestType.GEMINI_NATIVE]: new GeminiNativeStrategy(CONFIG),
+		[RequestType.GENERIC_PROXY]: new GenericProxyStrategy(CONFIG),
+	};
+};
+
+const initializationPromise = initializeDependencies();
+
+const getApiKeyForRequest = (userKey: string | null, model: string | null): ApiKeyResult | null => {
+	if (!userKey) return null;
+	if (!getTriggerKeys().has(userKey)) return { key: userKey, source: 'user' };
+	if (model && getFallbackModels().has(model.trim())) {
+		const fbKey = getFallbackKey();
+		if (fbKey) return { key: fbKey, source: 'fallback' };
+	}
+	const pool = getPoolKeys();
+	const randomPoolKey = getRandomElement(pool);
+	if (randomPoolKey) return { key: randomPoolKey, source: 'pool' };
+	return null;
+};
+
+const getApiKeyFromReq = (c: Context): string | null => {
+	const url = new URL(c.req.url);
+	return url.searchParams.get('key') || c.req.header("Authorization")?.replace(/^bearer\s+/i, '') || c.req.header("x-goog-api-key") || null;
+};
+const buildBaseProxyHeaders = (h: Headers): Headers => { const n = new Headers(h); n.delete('host'); return n; };
+
+const _getGeminiAuthDetails = (c: Context, model: string | null, attempt: number, name: string): AuthenticationDetails => {
+	const userApiKey = getApiKeyFromReq(c);
+	const isModels = new URL(c.req.url).pathname.endsWith('/models');
+	let result: ApiKeyResult | null = null;
+	if (attempt === 1) {
+		result = getApiKeyForRequest(userApiKey, model);
+		if (!result && !isModels) throw new Response(`No valid API key (${name})`, { status: 401 });
+	} else if (userApiKey && getTriggerKeys().has(userApiKey)) {
+		const pool = getPoolKeys();
+		const randomPoolKey = getRandomElement(pool);
+		if (randomPoolKey) result = { key: randomPoolKey, source: 'pool' };
+		else if (!isModels) throw new Response(`Key pool exhausted (${name})`, { status: 503 });
+	} else if (attempt > 1 && !isModels) {
+		throw new Response(`Request failed, non-trigger key won't be retried (${name})`, { status: 503 });
+	}
+	return { key: result?.key || null, source: result?.source || null, gcpToken: null, gcpProject: null, maxRetries: result?.source === 'pool' ? getApiRetryLimit() : 1 };
+};
 
 // =================================================================================
 // --- 5. 策略选择器与主处理函数 ---
