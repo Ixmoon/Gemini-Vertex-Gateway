@@ -437,7 +437,13 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
 			requestForFirstAttempt = new Request(originalReq, { body: stream1 });
 			bodyBufferPromise = (async () => {
 				try {
-					return await new Response(stream2).arrayBuffer();
+					const bodyBuffer = await new Response(stream2).arrayBuffer();
+					try {
+						console.log(`Request Body: ${new TextDecoder().decode(bodyBuffer)}`);
+					} catch(e) {
+						console.error("Failed to decode and log request body:", e)
+					}
+					return bodyBuffer;
 				} catch (e) {
 					console.error("Error buffering request body:", e);
 					return null; // Return null if buffering fails
