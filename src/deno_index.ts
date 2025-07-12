@@ -418,6 +418,7 @@ const determineRequestType = (req: Request): { type: RequestType, prefix: string
 
 const handleGenericProxy = async (c: Context): Promise<Response> => {
 	const originalReq = c.req.raw;
+	console.log(`Request path: ${new URL(originalReq.url).pathname}`);
 	const { type, ...details } = determineRequestType(originalReq);
 
 	if (type === RequestType.UNKNOWN) {
