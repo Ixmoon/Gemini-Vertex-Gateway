@@ -418,7 +418,6 @@ const determineRequestType = (req: Request): { type: RequestType, prefix: string
 
 const handleGenericProxy = async (c: Context): Promise<Response> => {
 	const originalReq = c.req.raw;
-	console.log(`Request path: ${new URL(originalReq.url).pathname}`);
 	const { type, ...details } = determineRequestType(originalReq);
 
 	if (type === RequestType.UNKNOWN) {
@@ -437,13 +436,7 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
 			requestForFirstAttempt = new Request(originalReq, { body: stream1 });
 			bodyBufferPromise = (async () => {
 				try {
-					const bodyBuffer = await new Response(stream2).arrayBuffer();
-					try {
-						console.log(`Request Body: ${new TextDecoder().decode(bodyBuffer)}`);
-					} catch(e) {
-						console.error("Failed to decode and log request body:", e)
-					}
-					return bodyBuffer;
+					return await new Response(stream2).arrayBuffer();
 				} catch (e) {
 					console.error("Error buffering request body:", e);
 					return null; // Return null if buffering fails
