@@ -1,20 +1,19 @@
 // src/managers.ts
+//
+// 该文件负责管理整个应用的配置。
+//
+// 它定义了 AppConfig 接口，作为应用配置的统一数据结构。
+//
+// 它实现了 ConfigManager 类，这是一个单例管理器，负责：
+// 1. 从构建时生成的 `./config_data.ts` 模块中导入原始配置数据。
+// 2. 在首次访问时，将导入的数据初始化并转换为运行时的 AppConfig 格式（例如将数组转换为 Set）。
+// 3. 为应用的其他部分提供一个统一的、懒加载的 get() 方法来获取配置。
+//
+// 这种设计将配置的来源（构建时生成）和使用（运行时访问）解耦，
+// 使得应用代码无需关心配置是如何加载的。
 
-export const ENV_KEYS = {
-	TRIGGER_KEYS: "TRIGGER_KEYS",
-	POOL_KEYS: "POOL_KEYS",
-	FALLBACK_KEY: "FALLBACK_KEY",
-	FALLBACK_MODELS: "FALLBACK_MODELS",
-	API_RETRY_LIMIT: "API_RETRY_LIMIT",
-	GCP_CREDENTIALS: "GCP_CREDENTIALS",
-	GCP_DEFAULT_LOCATION: "GCP_DEFAULT_LOCATION",
-	API_MAPPINGS: "API_MAPPINGS",
-};
-
-const getSetFromEnv = (varName: string): Set<string> => {
-	const val = Deno.env.get(varName);
-	return val ? new Set(val.split(',').map(s => s.trim()).filter(Boolean)) : new Set();
-};
+import type { GcpCredentials } from "./deno_index.ts";
+import * as configData from "./config_data.ts";
 
 export interface AppConfig {
     triggerKeys: Set<string>;
@@ -22,7 +21,7 @@ export interface AppConfig {
     fallbackKey: string | null;
     fallbackModels: Set<string>;
     apiRetryLimit: number;
-    gcpCredentialsString: string | null;
+    gcpCredentials: GcpCredentials[];
     gcpDefaultLocation: string;
     apiMappings: Record<string, string>;
 }
@@ -32,34 +31,14 @@ class ConfigManager {
 
     private initialize(): AppConfig {
         const newConfig: AppConfig = {
-            triggerKeys: getSetFromEnv(ENV_KEYS.TRIGGER_KEYS),
-            poolKeys: Array.from(getSetFromEnv(ENV_KEYS.POOL_KEYS)),
-            fallbackKey: Deno.env.get(ENV_KEYS.FALLBACK_KEY) || null,
-            fallbackModels: getSetFromEnv(ENV_KEYS.FALLBACK_MODELS),
-            apiRetryLimit: (() => {
-                const limit = parseInt(Deno.env.get(ENV_KEYS.API_RETRY_LIMIT) || "1", 10);
-                return isNaN(limit) || limit < 1 ? 1 : limit;
-            })(),
-            gcpCredentialsString: Deno.env.get(ENV_KEYS.GCP_CREDENTIALS) || null,
-            gcpDefaultLocation: Deno.env.get(ENV_KEYS.GCP_DEFAULT_LOCATION) || "global",
-            apiMappings: (() => {
-                const mappings: Record<string, string> = {};
-                const raw = Deno.env.get(ENV_KEYS.API_MAPPINGS);
-                if (raw) {
-                    raw.split(',').forEach(pair => {
-                        const parts = pair.trim().match(/^(\/.*?):(.+)$/);
-                        if (parts && parts.length === 3) {
-                            try {
-                                new URL(parts[2]);
-                                mappings[parts[1]] = parts[2];
-                            } catch {
-                                console.warn(`[Config] Invalid URL in API_MAPPINGS for prefix "${parts[1]}"`);
-                            }
-                        }
-                    });
-                }
-                return mappings;
-            })(),
+            triggerKeys: new Set(configData.triggerKeys),
+            poolKeys: configData.poolKeys,
+            fallbackKey: configData.fallbackKey,
+            fallbackModels: new Set(configData.fallbackModels),
+            apiRetryLimit: configData.apiRetryLimit,
+            gcpCredentials: configData.gcpCredentials,
+            gcpDefaultLocation: configData.gcpDefaultLocation,
+            apiMappings: configData.apiMappings,
         };
         this.config = newConfig;
         return this.config;

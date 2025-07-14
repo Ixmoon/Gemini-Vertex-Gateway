@@ -1,17 +1,95 @@
+// src/deno_index.ts
+//
+// 该文件是 LLM 网关服务的核心入口点。它负责：
+// 1. 使用 Hono 框架设置 Web 服务器。
+// 2. 定义所有必要的类型接口和常量。
+// 3. 实现一个带状态的、均匀随机的轮询选择器 (RoundRobinSelector)，用于 API 密钥和 GCP 凭据的负载均衡。
+//    该选择器使用 crypto.getRandomValues() 以获得高质量的随机性。
+// 4. 实现一个策略模式 (Strategy Pattern)，根据请求路径动态选择不同的后端服务处理器（如 Vertex AI, Gemini, Generic Proxy）。
+// 5. 管理 GCP 认证和 API 密钥的懒加载和轮询逻辑。配置通过构建时生成的 config_data.ts 模块加载，而非环境变量。
+// 6. 处理所有入站请求的代理、重试和错误处理。
+// 7. 启动 Deno 服务器。
+
 import { Hono, Context } from "hono";
 import { GoogleAuth } from "google-auth-library";
 import { AppConfig, configManager } from "./managers.ts";
 
-const getRandomElement = <T>(arr: T[]): T | undefined => {
-	if (arr.length === 0) return undefined;
-	return arr[Math.floor(Math.random() * arr.length)];
-};
+
+
+/**
+ * RoundRobinSelector 类实现了带随机洗牌的循环选择逻辑。
+ * 它确保在所有元素都被使用之前，每个元素只被选择一次。
+ * 当所有元素都用完后，它会重置并重新洗牌，从而实现均匀的随机轮询。
+ */
+class RoundRobinSelector<T> {
+	private originalItems: T[];
+	private availableItems: T[];
+	private usedItems: T[] = [];
+
+	constructor(items: T[]) {
+		this.originalItems = [...items];
+		this.availableItems = this._shuffle([...items]);
+	}
+
+	/**
+	 * 使用 Fisher-Yates 洗牌算法和密码学安全随机数生成器 (crypto.getRandomValues) 随机打乱数组。
+	 * 这提供了比 Math.random() 更高质量、更均匀的随机性。
+	 * @param array 要打乱的数组。
+	 * @returns 打乱后的数组。
+	 */
+	private _shuffle(array: T[]): T[] {
+		let currentIndex = array.length;
+		const randomValues = new Uint32Array(1);
+
+		while (currentIndex !== 0) {
+			// 生成一个密码学安全的随机索引
+			crypto.getRandomValues(randomValues);
+			const randomIndex = randomValues[0] % currentIndex;
+			currentIndex--;
+
+			// 交换元素
+			[array[currentIndex], array[randomIndex]] = [
+				array[randomIndex], array[currentIndex]];
+		}
+		return array;
+	}
+
+	/**
+	 * 获取下一个可用元素。如果所有元素都已使用，则重置并重新洗牌。
+	 * @returns 下一个元素或 undefined（如果原始列表为空）。
+	 */
+	public next(): T | undefined {
+		if (this.originalItems.length === 0) {
+			return undefined;
+		}
+
+		if (this.availableItems.length === 0) {
+			// 所有元素都已用完，重置并重新洗牌
+			this.availableItems = this._shuffle([...this.originalItems]);
+			this.usedItems = [];
+		}
+
+		const selected = this.availableItems.shift(); // 取出第一个元素
+		if (selected !== undefined) {
+			this.usedItems.push(selected); // 记录为已使用
+		}
+		return selected;
+	}
+
+	/**
+	 * 强制重置选择器，清空已使用列表并重新洗牌。
+	 */
+	public reset(): void {
+		this.availableItems = this._shuffle([...this.originalItems]);
+		this.usedItems = [];
+	}
+}
 
 // =================================================================================
 // --- 1. 类型定义与常量 ---
 // =================================================================================
 
-interface GcpCredentials { type: string; project_id: string; private_key_id: string; private_key: string; client_email: string; client_id?: string; }
+export interface GcpCredentials { type: string; project_id: string; private_key_id: string; private_key: string; client_email: string; client_id?: string; }
 type ApiKeySource = 'user' | 'fallback' | 'pool';
 type ApiKeyResult = { key: string; source: ApiKeySource };
 enum RequestType { VERTEX_AI, GEMINI_OPENAI, GEMINI_NATIVE, GENERIC_PROXY, UNKNOWN }
@@ -240,20 +318,11 @@ class GcpAuthManager {
     private initialize(): GcpAuth {
         const config = configManager.get();
         const authInstanceCache = new Map<string, GoogleAuth>();
-        let credentials: GcpCredentials[] = [];
-
-        try {
-            const credsStr = config.gcpCredentialsString;
-            if (credsStr) {
-                const parsed = JSON.parse(credsStr);
-                credentials = (Array.isArray(parsed) ? parsed : [parsed]).filter(isValidGcpCred);
-            }
-            if (credentials.length === 0) {
-                console.warn("[GCP] No valid GCP credentials found in GCP_CREDENTIALS.");
-            }
-        } catch (e) {
-            console.error("[GCP] Failed to parse GCP_CREDENTIALS on startup:", e);
+        const credentials = config.gcpCredentials;
+        if (credentials.length === 0) {
+            console.warn("[GCP] No valid GCP credentials found in the configuration.");
         }
+        const credentialSelector = new RoundRobinSelector(credentials);
 
         const getAuthInstance = (credential: GcpCredentials): GoogleAuth => {
             if (!authInstanceCache.has(credential.client_email)) {
@@ -266,8 +335,7 @@ class GcpAuthManager {
         };
 
         const getAuth = async (): Promise<{ token: string; projectId: string } | null> => {
-            if (credentials.length === 0) return null;
-            const selectedCredential = getRandomElement(credentials);
+            const selectedCredential = credentialSelector.next();
             if (!selectedCredential) return null;
 
             try {
@@ -301,6 +369,9 @@ class GcpAuthManager {
     }
 }
 const gcpAuthManager = new GcpAuthManager();
+
+// --- API Key Pool Selector (Singleton) ---
+const poolKeySelector = new RoundRobinSelector(configManager.get().poolKeys);
 
 
 // --- Strategy Manager (Lazy Loaded & Race-Condition Safe) ---
@@ -362,8 +433,8 @@ const getApiKeyForRequest = (userKey: string | null, model: string | null): ApiK
 	if (model && config.fallbackModels.has(model.trim())) {
 		if (config.fallbackKey) return { key: config.fallbackKey, source: 'fallback' };
 	}
-	const randomPoolKey = getRandomElement(config.poolKeys);
-	if (randomPoolKey) return { key: randomPoolKey, source: 'pool' };
+	const poolKey = poolKeySelector.next();
+	if (poolKey) return { key: poolKey, source: 'pool' };
 	return null;
 };
 
@@ -382,8 +453,8 @@ const _getGeminiAuthDetails = (c: Context, model: string | null, attempt: number
 		result = getApiKeyForRequest(userApiKey, model);
 		if (!result && !isModels) throw new Response(`No valid API key (${name})`, { status: 401 });
 	} else if (userApiKey && config.triggerKeys.has(userApiKey)) {
-		const randomPoolKey = getRandomElement(config.poolKeys);
-		if (randomPoolKey) result = { key: randomPoolKey, source: 'pool' };
+		const poolKey = poolKeySelector.next();
+		if (poolKey) result = { key: poolKey, source: 'pool' };
 		else if (!isModels) throw new Response(`Key pool exhausted (${name})`, { status: 503 });
 	} else if (attempt > 1 && !isModels) {
 		throw new Response(`Request failed, non-trigger key won't be retried (${name})`, { status: 503 });

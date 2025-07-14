@@ -2,9 +2,9 @@
 
 ## What is this?
 
-A stateless API gateway for Google Gemini and Vertex AI APIs, configured entirely via **environment variables**. It's designed to simplify access, authentication, and key management while enhancing security and availability.
+A stateless API gateway for Google Gemini and Vertex AI APIs, configured via a **build-time generated file**. It's designed to simplify access, authentication, and key management while enhancing security and availability.
 
-This gateway acts as a smart relay. Direct your requests intended for Google services to the paths you configure (e.g., `/gemini` or `/vertex`). Based on environment variable settings, the gateway automatically handles authentication (including Gemini Key rotation and GCP credential rotation), performs intelligent routing based on model names or paths, and securely forwards the requests to the appropriate Google service.
+This gateway acts as a smart relay. Direct your requests intended for Google services to the paths you configure (e.g., `/gemini` or `/vertex`). Based on your configuration file, the gateway automatically handles authentication (including Gemini Key rotation and GCP credential rotation), performs intelligent routing based on model names or paths, and securely forwards the requests to the appropriate Google service.
 
 It also provides basic HTTP proxy functionality. You can configure other path prefixes to forward requests to any web service.
 
@@ -26,62 +26,85 @@ It also provides basic HTTP proxy functionality. You can configure other path pr
 *   **Model-Driven Routing**:
     *   Routes requests to a designated **Fallback Key** based on the model name. This is often used to direct specific requests (e.g., for paid models) to a dedicated key for cost optimization or fine-grained access control.
 *   **Gemini Key Rotation & Retry**: For requests to the Gemini API, automatically selects an API Key from the "Pool Keys" in rotation and attempts retries with other keys upon failure.
-*   **Enhanced Security**: Securely injects your actual Google API keys and GCP service account credentials via environment variables on the backend.
+*   **Enhanced Security**: Decouples your actual Google API keys and GCP service account credentials from the application code, ensuring security by injecting them at build time.
 *   **Unified Entry Point & Simplified Authentication**: Uses `/gemini`, `/vertex`, etc., as unified paths for Google LLM services, requiring clients only to manage simple "trigger keys".
-*   **Stateless & Easy Deployment**: Requires no database or external storage. All configuration comes from environment variables, greatly simplifying deployment and scaling.
+*   **Stateless & Easy Deployment**: Requires no database or external storage. Configuration is bundled at build time, greatly simplifying deployment and scaling.
 
 ## Who is it for?
 
 *   Developers calling Google Gemini or Vertex AI APIs.
 *   Individuals or teams seeking to simplify and secure their Google API key and GCP credential management.
 *   Users looking to improve the stability and availability of their Google LLM API calls.
-*   Users who prefer configuring deployments via environment variables.
 
-## Quick Deployment (Recommended: Deno Deploy)
+## Quick Deployment (Recommended: Via GitHub Actions to Deno Deploy)
 
-Deploying to Deno Deploy is the simplest method.
+This project is configured for automatic deployment via GitHub Actions.
 
-1.  **Prepare Code**: Fork this project or host the code in your own GitHub repository.
-2.  **Visit Deno Deploy**: Go to the [Deno Deploy website](https://deno.com/deploy) and log in with GitHub.
-3.  **Create Project**: Click "New Project".
-4.  **Link Repository**: Select the GitHub repository containing the gateway code.
-5.  **Set Entry Point**: Specify the entry point file as `src/deno_index.ts`.
-6.  **Add Environment Variables**: In the "Environment Variables" section, add the variables described in the "How to Configure" section below.
-7.  **Deploy**: Click "Link" / "Deploy".
-8.  **Get Your URL**: Note down your deployment URL (e.g., `https://<your-project-name>.deno.dev`).
+1.  **Fork the Repository**: Fork this project to your GitHub account.
+2.  **Create a Deno Deploy Project**:
+    *   Go to the [Deno Deploy website](https://deno.com/deploy) and log in with your GitHub account.
+    *   Click "New Project" and select an **"Empty" project**. Do not link a Git repository.
+    *   Take note of your project name (e.g., `funky-lion-42`).
+3.  **Set up GitHub Secrets**:
+    *   In your forked repository, go to `Settings` > `Secrets and variables` > `Actions`.
+    *   Create a new Repository Secret named `SECRETS_CONFIG_JSON`.
+    *   Paste the **entire content** of your `secrets.config.json` file as the value for this secret.
+4.  **Update the Deployment Workflow**:
+    *   Open the `.github/workflows/deploy.yml` file.
+    *   Replace `"your-deno-project-name"` in `project: "your-deno-project-name"` with the project name you got from Deno Deploy.
+5.  **Trigger Deployment**:
+    *   Commit and push your changes to the `main` branch.
+    *   GitHub Actions will automatically run, build, and deploy your gateway.
+6.  **Get Your URL**: Find your deployment URL on your Deno Deploy project dashboard.
 
-*Note: Deno Deploy's free tier has resource limitations.*
+## How to Configure (Via `secrets.config.json`)
 
-## How to Configure (Via Environment Variables)
+All configuration is managed through the `secrets.config.json` file in the project root. For deployment, the content of this file must be set as a GitHub Repository Secret.
 
-Configure all gateway features by setting environment variables.
+**Important**: This file should not be committed to Git. A rule for this is already included in `.gitignore`.
 
-*   **`API_MAPPINGS` (Required)**: Defines mappings from path prefixes to target URLs.
-    *   **Format**: `/<prefix1>:<target_url1>,/<prefix2>:<target_url2>`
-    *   **Example**: `/gemini:https://generativelanguage.googleapis.com,/other:https://api.example.com`
+### Configuration File Structure
+
+```json
+{
+  "gcpCredentials": [],
+  "poolKeys": [],
+  "triggerKeys": [],
+  "fallbackKey": null,
+  "fallbackModels": [],
+  "apiRetryLimit": 1,
+  "gcpDefaultLocation": "global",
+  "apiMappings": {
+    "/gemini": "https://generativelanguage.googleapis.com"
+  }
+}
+```
+
+### Field Descriptions
+
+*   **`apiMappings` (Required)**: Defines mappings from path prefixes to target URLs.
+    *   **Example**: `"apiMappings": { "/gemini": "https://generativelanguage.googleapis.com", "/other": "https://api.example.com" }`
     *   **Note**: Must include a mapping for Gemini. `/vertex` is a special built-in path and does not need to be configured here.
 
-*   **`TRIGGER_KEYS` (Required)**: The "passcodes" clients need to call the gateway. Multiple keys can be set.
-    *   **Format**: `<key1>,<key2>,...`
-    *   **Example**: `my_secret_key,another_key`
+*   **`triggerKeys` (Required)**: A list of "passcodes" that clients need to use to call the gateway.
+    *   **Format**: An array of strings, `["key1", "key2"]`
 
-*   **`POOL_KEYS` (For Gemini)**: A pool of Google API keys for Gemini API rotation and retries.
-    *   **Format**: `<g_api_key1>,<g_api_key2>,...`
+*   **`poolKeys` (For Gemini)**: A pool of Google API keys for Gemini API rotation and retries.
+    *   **Format**: An array of strings, `["g_api_key1", "g_api_key2"]`
 
-*   **`FALLBACK_KEY` & `FALLBACK_MODELS` (Optional)**: Set a dedicated Google API key and specify which model requests should be routed directly to it.
-    *   `FALLBACK_KEY`: **Format**: `<single_g_api_key>`
-    *   `FALLBACK_MODELS`: **Format**: `<model1>,<model2>,...` (e.g., `gemini-pro,gemini-ultra`)
+*   **`fallbackKey` & `fallbackModels` (Optional)**: Set a dedicated Google API key and specify which model requests should be routed directly to it.
+    *   `fallbackKey`: **Format**: A single string or `null`
+    *   `fallbackModels`: **Format**: An array of strings, `["gemini-pro", "gemini-ultra"]`
 
-*   **`GCP_CREDENTIALS` (For Vertex AI)**: Contains one or more GCP service account credentials (in JSON format).
-    *   **Format**: `[{...gcp_cred_json...}]` (for a single credential) or `[[{...cred1...},{...cred2...}]]` (for an array of multiple credentials).
-    *   **It is strongly recommended** to set this as a "Secret" type environment variable on platforms like Deno Deploy.
+*   **`gcpCredentials` (For Vertex AI)**: An array containing one or more GCP service account credential objects (JSON format).
+    *   **Format**: `[{...cred1...}, {...cred2...}]`
 
-*   **`GCP_DEFAULT_LOCATION` (For Vertex AI)**: The region for your GCP project.
-    *   **Format**: A string, e.g., `us-central1` or `global`.
-    *   **Default**: `global`
+*   **`gcpDefaultLocation` (For Vertex AI)**: The region for your GCP project.
+    *   **Format**: A string, e.g., `"us-central1"`.
+    *   **Default**: `"global"`
 
-*   **`API_RETRY_LIMIT` (Optional)**: The maximum number of different keys/credentials to try from the pool upon failure.
-    *   **Format**: A numeric string, e.g., `3`.
+*   **`apiRetryLimit` (Optional)**: The maximum number of different keys/credentials to try from the pool upon failure.
+    *   **Format**: A number, e.g., `3`.
     *   **Default**: `1`
 
 ## How to Call APIs
@@ -113,15 +136,16 @@ This endpoint intelligently handles two types of requests:
 ## (Optional) Running Locally
 
 1.  **Install Deno**: See [Deno's official website](https://deno.land/).
-2.  **Create a `.env` file**: Create a `.env` file in the project root and populate it with the environment variables described above.
-3.  **Load Environment Variables and Run**:
+2.  **Create Configuration File**: Create a `secrets.config.json` file in the project root and fill in your configuration.
+3.  **Generate a Configuration Module**: Run the build script to generate `src/config_data.ts`.
     ```bash
-    # You may need to install deno_dotenv first
-    deno install -A -r https://deno.land/x/dotenv/load.ts
-    # Run the server
-    deno run --allow-net --allow-env ./src/deno_index.ts
+    deno run -A build.ts
     ```
-4.  **Access**: The service runs at `http://localhost:8080` by default.
+4.  **Run the Service**:
+    ```bash
+    deno run --allow-net ./src/deno_index.ts
+    ```
+5.  **Access**: The service runs at `http://localhost:8000` by default.
 
 ---
 

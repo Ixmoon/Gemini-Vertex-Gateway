@@ -2,9 +2,9 @@
 
 ## 这是什么?
 
-一个为 Google Gemini 和 Vertex AI API 设计的、通过**环境变量**配置的无状态 API 网关。它旨在简化访问、认证和密钥管理，提升安全性和可用性。
+一个为 Google Gemini 和 Vertex AI API 设计的、通过**构建时生成的配置文件**配置的无状态 API 网关。它旨在简化访问、认证和密钥管理，提升安全性和可用性。
 
-此网关充当一个智能中转站。将发往 Google 的请求指向此网关配置的路径（如 `/gemini` 或 `/vertex`），网关会依据环境变量配置，自动处理认证（包括 Gemini Key 轮换和 GCP 凭证轮换）、根据模型名称或路径进行智能路由，并将请求安全地转发给 Google 的相应服务。
+此网关充当一个智能中转站。将发往 Google 的请求指向此网关配置的路径（如 `/gemini` 或 `/vertex`），网关会依据配置文件，自动处理认证（包括 Gemini Key 轮换和 GCP 凭证轮换）、根据模型名称或路径进行智能路由，并将请求安全地转发给 Google 的相应服务。
 
 同时，它也提供基础的 HTTP 代理功能，可配置其他路径前缀以转发请求至任意网络服务。
 
@@ -26,62 +26,85 @@
 *   **模型驱动的路由**:
     *   根据模型名称将请求路由到指定的 **Fallback Key**。此功能常用于将特定请求（如使用付费模型）导向专用密钥，实现成本优化或精细化访问控制。
 *   **Gemini 密钥轮换与重试**: 对于发往 Gemini API 的请求，自动从“主密钥池”中轮流选择 API Key，并在调用失败时根据配置尝试池中其他密钥。
-*   **增强安全性**: 将真实的 Google API 密钥和 GCP 服务账号凭证通过环境变量安全地注入到后端。
+*   **增强安全性**: 将真实的 Google API 密钥和 GCP 服务账号凭证与应用代码解耦，通过在构建时注入的方式保证安全。
 *   **统一入口与简化认证**: 使用 `/gemini`, `/vertex` 等作为访问 Google LLM 服务的统一路径，客户端仅需管理和使用简单的“触发密钥”。
-*   **无状态与易于部署**: 无需数据库或外部存储，所有配置均来自环境变量，极大简化了部署和扩展。
+*   **无状态与易于部署**: 无需数据库或外部存储，配置在构建时被打包，极大简化了部署和扩展。
 
 ## 适合谁用?
 
 *   需要调用 Google Gemini 或 Vertex AI API 的开发者。
 *   寻求简化和保护 Google API 密钥及 GCP 凭证管理的个人或团队。
 *   希望提高 Google LLM API 调用稳定性和可用性的用户。
-*   偏好通过环境变量进行部署和配置的用户。
 
-## 快速部署 (推荐: Deno Deploy)
+## 快速部署 (推荐: 通过 GitHub Actions 部署到 Deno Deploy)
 
-部署到 Deno Deploy 是最简单的方式。
+本项目配置了通过 GitHub Actions 自动部署。
 
-1.  **准备代码**: Fork 本项目或将代码托管在你的 GitHub 仓库。
-2.  **访问 Deno Deploy**: 前往 [Deno Deploy 网站](https://deno.com/deploy) 并使用 GitHub 账号登录。
-3.  **创建项目**: 点击 "New Project"。
-4.  **关联仓库**: 选择包含此网关代码的 GitHub 仓库。
-5.  **选择入口文件**: 指定入口文件为 `src/deno_index.ts`。
-6.  **添加环境变量**: 在 "Environment Variables" 部分，添加下文“如何配置”中描述的变量。
-7.  **部署**: 点击 "Link" / "Deploy"。
-8.  **获取你的专属网址**: 部署成功后，记录下你的部署网址 (例如 `https://<你的项目名>.deno.dev`)。
+1.  **Fork 仓库**: Fork 本项目到你的 GitHub 账号。
+2.  **创建 Deno Deploy 项目**:
+    *   前往 [Deno Deploy 网站](https://deno.com/deploy) 并使用 GitHub 账号登录。
+    *   点击 "New Project"，但**选择 "Empty" 项目**，不要关联 Git 仓库。
+    *   记录下你的项目名称 (例如 `funky-lion-42`)。
+3.  **在 GitHub 中设置 Secrets**:
+    *   在你的 Fork 后的仓库中，进入 `Settings` > `Secrets and variables` > `Actions`。
+    *   创建一个名为 `SECRETS_CONFIG_JSON` 的 Repository Secret。
+    *   将你的 `secrets.config.json` 文件的**全部内容**作为这个 Secret 的值粘贴进去。
+4.  **更新部署工作流**:
+    *   打开 `.github/workflows/deploy.yml` 文件。
+    *   将 `project: "your-deno-project-name"` 中的 `"your-deno-project-name"` 替换为你在 Deno Deploy 上获取的项目名称。
+5.  **触发部署**:
+    *   提交并推送你的修改到 `main` 分支。
+    *   GitHub Actions 将自动运行，构建并部署你的网关。
+6.  **获取你的专属网址**: 部署成功后，你可以在 Deno Deploy 仪表盘上找到你的项目网址。
 
-*注意: Deno Deploy 免费套餐有资源限制。*
+## 如何配置 (通过 `secrets.config.json`)
 
-## 如何配置 (通过环境变量)
+所有配置都通过项目根目录下的 `secrets.config.json` 文件进行管理。在部署时，该文件的内容需要被设置到 GitHub Repository Secret 中。
 
-通过设置环境变量来配置网关的所有功能。
+**重要**: 这个文件不应被提交到 Git。`.gitignore` 中已包含此规则。
 
-*   **`API_MAPPINGS` (必需)**: 定义路径前缀到目标 URL 的映射。
-    *   **格式**: `/<prefix1>:<target_url1>,/<prefix2>:<target_url2>`
-    *   **示例**: `/gemini:https://generativelanguage.googleapis.com,/other:https://api.example.com`
+### 配置文件结构
+
+```json
+{
+  "gcpCredentials": [],
+  "poolKeys": [],
+  "triggerKeys": [],
+  "fallbackKey": null,
+  "fallbackModels": [],
+  "apiRetryLimit": 1,
+  "gcpDefaultLocation": "global",
+  "apiMappings": {
+    "/gemini": "https://generativelanguage.googleapis.com"
+  }
+}
+```
+
+### 字段说明
+
+*   **`apiMappings` (必需)**: 定义路径前缀到目标 URL 的映射。
+    *   **示例**: `"apiMappings": { "/gemini": "https://generativelanguage.googleapis.com", "/other": "https://api.example.com" }`
     *   **说明**: 必须包含一个用于 Gemini 的映射。`/vertex` 是一个内置的特殊路径，无需在此配置。
 
-*   **`TRIGGER_KEYS` (必需)**: 客户端调用网关时所需的“通行证”，可以设置多个。
-    *   **格式**: `<key1>,<key2>,...`
-    *   **示例**: `my_secret_key,another_key`
+*   **`triggerKeys` (必需)**: 客户端调用网关时所需的“通行证”列表。
+    *   **格式**: 字符串数组, `["key1", "key2"]`
 
-*   **`POOL_KEYS` (用于 Gemini)**: 存放 Google API 密钥的池，用于 Gemini API 的轮换和重试。
-    *   **格式**: `<g_api_key1>,<g_api_key2>,...`
+*   **`poolKeys` (用于 Gemini)**: 存放 Google API 密钥的池，用于 Gemini API 的轮换和重试。
+    *   **格式**: 字符串数组, `["g_api_key1", "g_api_key2"]`
 
-*   **`FALLBACK_KEY` & `FALLBACK_MODELS` (可选)**: 设置一个专用的 Google API 密钥，并指定哪些模型的请求应直接路由至此密钥。
-    *   `FALLBACK_KEY`: **格式**: `<single_g_api_key>`
-    *   `FALLBACK_MODELS`: **格式**: `<model1>,<model2>,...` (例如 `gemini-pro,gemini-ultra`)
+*   **`fallbackKey` & `fallbackModels` (可选)**: 设置一个专用的 Google API 密钥，并指定哪些模型的请求应直接路由至此密钥。
+    *   `fallbackKey`: **格式**: 单个字符串或 `null`
+    *   `fallbackModels`: **格式**: 字符串数组, `["gemini-pro", "gemini-ultra"]`
 
-*   **`GCP_CREDENTIALS` (用于 Vertex AI)**: 存放一个或多个 GCP 服务账号凭证 (JSON 格式)。
-    *   **格式**: `[{...gcp_cred_json...}]` (单个凭证) 或 `[[{...cred1...},{...cred2...}]]` (多个凭证的数组)。
-    *   **强烈建议**在 Deno Deploy 等平台将此 JSON 内容设为 "Secret" 类型的环境变量。
+*   **`gcpCredentials` (用于 Vertex AI)**: 存放一个或多个 GCP 服务账号凭证 (JSON 对象) 的数组。
+    *   **格式**: `[{...cred1...}, {...cred2...}]`
 
-*   **`GCP_DEFAULT_LOCATION` (用于 Vertex AI)**: GCP 项目的区域。
-    *   **格式**: 字符串，例如 `us-central1` 或 `global`。
-    *   **默认值**: `global`
+*   **`gcpDefaultLocation` (用于 Vertex AI)**: GCP 项目的区域。
+    *   **格式**: 字符串, 例如 `"us-central1"`。
+    *   **默认值**: `"global"`
 
-*   **`API_RETRY_LIMIT` (可选)**: 在使用主密钥池或 GCP 凭证调用失败时，最多尝试多少个不同的密钥/凭证。
-    *   **格式**: 数字字符串，例如 `3`。
+*   **`apiRetryLimit` (可选)**: 在使用主密钥池或 GCP 凭证调用失败时，最多尝试多少个不同的密钥/凭证。
+    *   **格式**: 数字, 例如 `3`。
     *   **默认值**: `1`
 
 ## 如何调用 API
@@ -113,15 +136,16 @@
 ## (可选) 本地运行
 
 1.  **安装 Deno**: 参考 [Deno 官网](https://deno.land/)。
-2.  **创建 `.env` 文件**: 在项目根目录创建一个 `.env` 文件并填入上述环境变量。
-3.  **加载环境变量并运行**:
+2.  **创建配置文件**: 在项目根目录创建一个 `secrets.config.json` 文件，并填入你的配置。
+3.  **生成配置模块**: 运行构建脚本来生成 `src/config_data.ts`。
     ```bash
-    # 需要先安装 deno_dotenv
-    deno install -A -r https://deno.land/x/dotenv/load.ts
-    # 运行
-    deno run --allow-net --allow-env ./src/deno_index.ts
+    deno run -A build.ts
     ```
-4.  **访问**: 服务默认运行在 `http://localhost:8080`。
+4.  **运行服务**:
+    ```bash
+    deno run --allow-net ./src/deno_index.ts
+    ```
+5.  **访问**: 服务默认运行在 `http://localhost:8000`。
 
 ---
 

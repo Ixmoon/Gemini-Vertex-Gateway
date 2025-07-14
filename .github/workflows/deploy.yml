@@ -1,0 +1,42 @@
+# .github/workflows/deploy.yml
+
+name: llm api gateway
+
+on:
+  push:
+    branches:
+      - main  # 只在代码被推送到 main 分支时触发
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write # 允许工作流获取 OIDC 令牌进行无密码认证
+      contents: read  # 允许工作流读取仓库内容
+
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.x
+
+      - name: Create secrets.config.json from secret
+        env:
+          SECRETS_DATA: ${{ secrets.SECRETS_CONFIG_JSON }}
+        run: echo "$SECRETS_DATA" > secrets.config.json
+
+      - name: Build configuration module
+        run: deno run -A build.ts
+
+      - name: Deploy to Deno Deploy
+        uses: denoland/deployctl@v1
+        with:
+          # 关键：将这里替换成您在 Deno Deploy 上创建的项目名称
+          project: "llmapigateway" # <--- !!! 修改这里 !!!
+
+          entrypoint: "src/deno_index.ts"
+          root: "."
