@@ -39,6 +39,6 @@ jobs:
         uses: denoland/deployctl@v1
         with:
           # 关键：将这里替换成您在 Deno Deploy 上创建的项目名称
-          project: "llm-api-gatway-test" # <--- !!! 修改这里 !!!
+          project: "llmapigateway" # <--- !!! 修改这里 !!!
           entrypoint: "src/deno_index.ts"
           root: "."
