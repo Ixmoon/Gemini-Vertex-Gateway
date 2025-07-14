@@ -1,0 +1,204 @@
+// src/strategies.ts
+//
+// 该文件包含了所有请求处理策略 (RequestHandlerStrategy) 的具体实现。
+// 每个策略类都封装了与特定后端服务（如 Vertex AI, Gemini, 或通用代理）
+// 通信所需的所有逻辑，包括认证、URL 构建、请求/响应处理等。
+//
+// 设计模式: 策略模式 (Strategy Pattern)
+// 通过将每个后端服务的处理逻辑封装在独立的策略类中，我们可以轻松地扩展
+// 以支持新的服务，而无需修改核心的路由和请求处理代码。
+
+import type { Context } from "hono";
+import type { AppConfig } from "./managers.ts";
+import type { AuthenticationDetails, GeminiModel, ModelProviderRequestBody, RequestHandlerStrategy, StrategyContext } from "./types.ts";
+import { getApiKeyFromReq, buildBaseProxyHeaders, _getGeminiAuthDetails } from "./auth.ts";
+
+// =================================================================================
+// --- 1. Vertex AI 策略 ---
+// =================================================================================
+
+export class VertexAIStrategy implements RequestHandlerStrategy {
+    private readonly config: AppConfig;
+    private readonly gcpAuth: () => Promise<{ token: string; projectId: string; } | null>;
+
+    constructor(config: AppConfig, gcpAuth: () => Promise<{ token: string; projectId: string; } | null>) {
+        this.config = config;
+        this.gcpAuth = gcpAuth;
+    }
+
+    async getAuthenticationDetails(c: Context, _ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
+        const userKey = getApiKeyFromReq(c) || 'N/A';
+        if (!this.config.triggerKeys.has(userKey)) {
+            throw new Response("Forbidden: A valid trigger key is required for the /vertex endpoint.", { status: 403 });
+        }
+        const auth = await this.gcpAuth();
+        if (!auth && attempt === 1) {
+            throw new Response("GCP authentication failed on first attempt. Check GCP_CREDENTIALS.", { status: 503 });
+        }
+        return { key: null, source: null, gcpToken: auth?.token || null, gcpProject: auth?.projectId || null, maxRetries: this.config.apiRetryLimit };
+    }
+
+    buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
+        if (!auth.gcpProject) throw new Error("Vertex AI requires a GCP Project ID.");
+        const loc = this.config.gcpDefaultLocation;
+        const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
+        const baseUrl = `https://${host}/v1beta1/projects/${auth.gcpProject}/locations/${loc}/endpoints/openapi`;
+
+        let targetPath = ctx.path;
+        if (targetPath.startsWith('/v1/')) {
+            targetPath = targetPath.slice(3); // Removes "/v1" leaving "/chat/completions"
+        }
+
+        const url = new URL(`${baseUrl}${targetPath}`);
+        ctx.originalUrl.searchParams.forEach((v, k) => k.toLowerCase() !== 'key' && url.searchParams.set(k, v));
+        return url;
+    }
+
+    buildRequestHeaders(ctx: StrategyContext, auth: AuthenticationDetails): Headers {
+        if (!auth.gcpToken) throw new Error("Vertex AI requires a GCP Token.");
+        const headers = buildBaseProxyHeaders(ctx.originalRequest.headers);
+        headers.delete('authorization');
+        headers.set('Authorization', `Bearer ${auth.gcpToken}`);
+        return headers;
+    }
+
+    async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null> {
+        if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD' || !ctx.originalRequest.body) {
+            return null;
+        }
+        try {
+            const bodyToModify = await ctx.originalRequest.json() as ModelProviderRequestBody;
+            if (typeof bodyToModify !== 'object' || bodyToModify === null) {
+                return JSON.stringify(bodyToModify);
+            }
+            if (bodyToModify.model && typeof bodyToModify.model === 'string' && !bodyToModify.model.startsWith('google/')) {
+                bodyToModify.model = `google/${bodyToModify.model}`;
+            }
+            if (bodyToModify.reasoning_effort === 'none') {
+                delete bodyToModify.reasoning_effort;
+            }
+            bodyToModify.google = {
+                ...(bodyToModify.google || {}),
+                safety_settings: [
+                    { "category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF" },
+                    { "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF" },
+                    { "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF" },
+                    { "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF" },
+                ]
+            };
+            return JSON.stringify(bodyToModify);
+        } catch (e) {
+            console.error("Vertex: Failed to parse request body from stream:", e);
+            throw new Response("Failed to parse request body for Vertex AI. Invalid JSON.", { status: 400 });
+        }
+    }
+}
+
+// =================================================================================
+// --- 2. Gemini (OpenAI-Compatible) 策略 ---
+// =================================================================================
+
+export class GeminiOpenAIStrategy implements RequestHandlerStrategy {
+    private readonly config: AppConfig;
+
+    constructor(config: AppConfig) {
+        this.config = config;
+    }
+
+    async getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
+        // Clone the request to read the body, allowing the original body to be streamed later.
+        const reqClone = ctx.originalRequest.clone();
+        const model = reqClone.body ? (await reqClone.json().catch(() => ({})) as ModelProviderRequestBody).model ?? null : null;
+        return _getGeminiAuthDetails(c, model, attempt, "Gemini OpenAI");
+    }
+    buildTargetUrl(ctx: StrategyContext): URL {
+        const baseUrl = this.config.apiMappings['/gemini'];
+        if (!baseUrl) throw new Response("Gemini base URL for '/gemini' not in API_MAPPINGS.", { status: 503 });
+
+        // 从原始路径中移除可选的 /v1 前缀，以获得标准的 OpenAI 路径
+        let openAIPath = ctx.path;
+        if (openAIPath.startsWith('/v1/')) {
+            openAIPath = openAIPath.slice(3); // e.g., /v1/chat/completions -> /chat/completions
+        }
+
+        // 构建符合 Gemini OpenAI 兼容层要求的正确路径
+        const geminiPath = `/v1beta/openai${openAIPath}`;
+
+        const url = new URL(geminiPath, baseUrl);
+        ctx.originalUrl.searchParams.forEach((v, k) => k.toLowerCase() !== 'key' && url.searchParams.set(k, v));
+        return url;
+    }
+    buildRequestHeaders(ctx: StrategyContext, auth: AuthenticationDetails): Headers {
+        const headers = buildBaseProxyHeaders(ctx.originalRequest.headers);
+        headers.delete('authorization'); headers.delete('x-goog-api-key');
+        if (auth.key) headers.set('Authorization', `Bearer ${auth.key}`);
+        return headers;
+    }
+    processRequestBody(ctx: StrategyContext) { return ctx.originalRequest.body; }
+    async handleResponse(res: Response, ctx: StrategyContext): Promise<Response> {
+        if (!ctx.path.endsWith('/models') || !res.headers.get("content-type")?.includes("json")) return res;
+        try {
+            const body = await res.json();
+            if (body?.data?.length) {
+                body.data.forEach((m: GeminiModel) => {
+                    if (m.id?.startsWith('models/')) {
+                        m.id = m.id.slice(7);
+                    }
+                });
+                const newBody = JSON.stringify(body);
+                const h = new Headers(res.headers);
+                h.delete('Content-Encoding');
+                h.set('Content-Length', String(new TextEncoder().encode(newBody).byteLength));
+                return new Response(newBody, { status: res.status, statusText: res.statusText, headers: h });
+            }
+            return new Response(JSON.stringify(body), { status: res.status, statusText: res.statusText, headers: res.headers });
+        } catch { return res; }
+    }
+}
+
+// =================================================================================
+// --- 3. Gemini (Native) 策略 ---
+// =================================================================================
+
+export class GeminiNativeStrategy implements RequestHandlerStrategy {
+    private readonly config: AppConfig;
+
+    constructor(config: AppConfig) {
+        this.config = config;
+    }
+
+    getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> { const model = ctx.path.match(/\/models\/([^:]+):/)?.[1] ?? null; return Promise.resolve(_getGeminiAuthDetails(c, model, attempt, "Gemini Native")); }
+    buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
+        if (!auth.key) throw new Response("Gemini Native requires an API Key.", { status: 500 });
+        const baseUrl = this.config.apiMappings['/gemini'];
+        if (!baseUrl) throw new Response("Gemini base URL for '/gemini' not in API_MAPPINGS.", { status: 503 });
+        const url = new URL(ctx.path, baseUrl);
+        ctx.originalUrl.searchParams.forEach((v, k) => k.toLowerCase() !== 'key' && url.searchParams.set(k, v));
+        url.searchParams.set('key', auth.key);
+        return url;
+    }
+    buildRequestHeaders(ctx: StrategyContext, _auth: AuthenticationDetails) { const h = buildBaseProxyHeaders(ctx.originalRequest.headers); h.delete('authorization'); h.delete('x-goog-api-key'); return h; }
+    processRequestBody(ctx: StrategyContext) { return ctx.originalRequest.body; }
+}
+
+// =================================================================================
+// --- 4. 通用代理策略 ---
+// =================================================================================
+
+export class GenericProxyStrategy implements RequestHandlerStrategy {
+    private readonly config: AppConfig;
+
+    constructor(config: AppConfig) {
+        this.config = config;
+    }
+
+    getAuthenticationDetails(): Promise<AuthenticationDetails> { return Promise.resolve({ key: null, source: null, gcpToken: null, gcpProject: null, maxRetries: 1 }); }
+    buildTargetUrl(ctx: StrategyContext): URL {
+        if (!ctx.prefix || !this.config.apiMappings[ctx.prefix]) throw new Response(`Proxy target for prefix '${ctx.prefix}' not in API_MAPPINGS.`, { status: 503 });
+        const url = new URL(ctx.path, this.config.apiMappings[ctx.prefix]);
+        ctx.originalUrl.searchParams.forEach((v, k) => url.searchParams.set(k, v));
+        return url;
+    }
+    buildRequestHeaders(ctx: StrategyContext, _auth: AuthenticationDetails) { return buildBaseProxyHeaders(ctx.originalRequest.headers); }
+    processRequestBody(ctx: StrategyContext) { return ctx.originalRequest.body; }
+}
