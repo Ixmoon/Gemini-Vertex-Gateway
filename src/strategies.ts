@@ -13,6 +13,8 @@ import type { AppConfig } from "./managers.ts";
 import type { AuthenticationDetails, GeminiModel, ModelProviderRequestBody, RequestHandlerStrategy, StrategyContext } from "./types.ts";
 import { getApiKeyFromReq, buildBaseProxyHeaders, _getGeminiAuthDetails } from "./auth.ts";
 
+const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
+
 // =================================================================================
 // --- 1. Vertex AI 策略 ---
 // =================================================================================
@@ -99,11 +101,8 @@ export class VertexAIStrategy implements RequestHandlerStrategy {
 // =================================================================================
 
 export class GeminiOpenAIStrategy implements RequestHandlerStrategy {
-    private readonly config: AppConfig;
-
-    constructor(config: AppConfig) {
-        this.config = config;
-    }
+    // This strategy no longer needs AppConfig
+    constructor() {}
 
     async getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
         // Clone the request to read the body, allowing the original body to be streamed later.
@@ -112,9 +111,6 @@ export class GeminiOpenAIStrategy implements RequestHandlerStrategy {
         return _getGeminiAuthDetails(c, model, attempt, "Gemini OpenAI");
     }
     buildTargetUrl(ctx: StrategyContext): URL {
-        const baseUrl = this.config.apiMappings['/gemini'];
-        if (!baseUrl) throw new Response("Gemini base URL for '/gemini' not in API_MAPPINGS.", { status: 503 });
-
         // 从原始路径中移除可选的 /v1 前缀，以获得标准的 OpenAI 路径
         let openAIPath = ctx.path;
         if (openAIPath.startsWith('/v1/')) {
@@ -124,7 +120,7 @@ export class GeminiOpenAIStrategy implements RequestHandlerStrategy {
         // 构建符合 Gemini OpenAI 兼容层要求的正确路径
         const geminiPath = `/v1beta/openai${openAIPath}`;
 
-        const url = new URL(geminiPath, baseUrl);
+        const url = new URL(geminiPath, GEMINI_BASE_URL);
         ctx.originalUrl.searchParams.forEach((v, k) => k.toLowerCase() !== 'key' && url.searchParams.set(k, v));
         return url;
     }
@@ -161,18 +157,13 @@ export class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 // =================================================================================
 
 export class GeminiNativeStrategy implements RequestHandlerStrategy {
-    private readonly config: AppConfig;
-
-    constructor(config: AppConfig) {
-        this.config = config;
-    }
+    // This strategy no longer needs AppConfig
+    constructor() {}
 
     getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> { const model = ctx.path.match(/\/models\/([^:]+):/)?.[1] ?? null; return Promise.resolve(_getGeminiAuthDetails(c, model, attempt, "Gemini Native")); }
     buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
         if (!auth.key) throw new Response("Gemini Native requires an API Key.", { status: 500 });
-        const baseUrl = this.config.apiMappings['/gemini'];
-        if (!baseUrl) throw new Response("Gemini base URL for '/gemini' not in API_MAPPINGS.", { status: 503 });
-        const url = new URL(ctx.path, baseUrl);
+        const url = new URL(ctx.path, GEMINI_BASE_URL);
         ctx.originalUrl.searchParams.forEach((v, k) => k.toLowerCase() !== 'key' && url.searchParams.set(k, v));
         url.searchParams.set('key', auth.key);
         return url;

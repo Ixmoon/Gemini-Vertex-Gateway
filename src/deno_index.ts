@@ -33,23 +33,24 @@ const determineRequestType = (req: Request): { type: RequestType | "UNKNOWN", pr
         return { type: "VERTEX_AI", prefix: '/vertex', path: pathname.slice('/vertex'.length) };
     }
 
-    // 2. 检查通用 API 映射
-    const mappings = configManager.getSync().apiMappings;
-    const prefix = Object.keys(mappings).find(p => pathname.startsWith(p));
-    const path = prefix ? pathname.slice(prefix.length) : pathname;
-
-    if (!prefix) {
-        return { type: "UNKNOWN", prefix: null, path };
-    }
-
-    // 3. Gemini 的路径需要进一步区分
-    if (prefix === '/gemini') {
+    // 2. 检查 Gemini 的特殊路径
+    if (pathname.startsWith('/gemini/')) {
+        const prefix = '/gemini';
+        const path = pathname.slice(prefix.length);
         // 根据路径是否包含 /v1beta/ 来区分是 OpenAI 兼容模式还是原生模式
-        // 注意：这里假设所有非 OpenAI 兼容的 Gemini 请求都走原生路径
         return { type: path.startsWith('/v1beta/') ? "GEMINI_NATIVE" : "GEMINI_OPENAI", prefix, path };
     }
 
+    // 3. 检查通用 API 映射
+    const mappings = configManager.getSync().apiMappings;
+    const prefix = Object.keys(mappings).find(p => pathname.startsWith(p));
+    
+    if (!prefix) {
+        return { type: "UNKNOWN", prefix: null, path: pathname };
+    }
+    
     // 4. 其他所有匹配的路径都视为通用代理
+    const path = pathname.slice(prefix.length);
     return { type: "GENERIC_PROXY", prefix, path };
 };
 
@@ -196,5 +197,4 @@ app.onError((err: Error, c: Context) => {
 });
 
 // --- 启动服务器 ---
-console.log("LLM Gateway Service starting...");
 Deno.serve(app.fetch);

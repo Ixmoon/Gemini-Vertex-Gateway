@@ -187,15 +187,16 @@ class StrategyManager {
                     return new VertexAIStrategy(config, gcpAuth.getAuth);
                 }
                 case "GEMINI_OPENAI":
-                    return new GeminiOpenAIStrategy(config);
+                    return new GeminiOpenAIStrategy();
                 case "GEMINI_NATIVE":
-                    return new GeminiNativeStrategy(config);
+                    return new GeminiNativeStrategy();
                 case "GENERIC_PROXY":
                     return new GenericProxyStrategy(config);
-                default:
+                default: {
                     // 这利用了 TypeScript 的 never 类型检查，确保所有枚举值都有处理
                     const exhaustiveCheck: never = type;
                     throw new Error(`Unsupported strategy type: ${exhaustiveCheck}`);
+                }
             }
         };
     }
