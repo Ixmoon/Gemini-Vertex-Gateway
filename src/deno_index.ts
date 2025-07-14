@@ -125,6 +125,24 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
                     Promise.resolve(strategy.buildRequestHeaders(context, auth))
                 ]);
 
+                // --- 调试日志：打印即将发送的完整请求 ---
+                console.log("==================== Outgoing Request ====================");
+                console.log(`--> ${currentRequest.method} ${targetUrl.toString()}`);
+                console.log("Headers:", Object.fromEntries(targetHeaders.entries()));
+                // 为了日志可读性，只在 body 是字符串时打印其内容
+                if (typeof targetBody === 'string') {
+                    try {
+                        console.log("Body:", JSON.parse(targetBody));
+                    } catch {
+                        console.log("Body (non-JSON):", targetBody);
+                    }
+                } else if (targetBody) {
+                    console.log("Body: [ReadableStream or other BodyInit type]");
+                } else {
+                    console.log("Body: [Empty]");
+                }
+                console.log("==========================================================");
+
                 const res = await fetch(targetUrl, {
                     method: currentRequest.method,
                     headers: targetHeaders,
