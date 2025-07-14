@@ -1,4 +1,4 @@
 {
-	"nodeModulesDir": "auto",
+	"nodeModulesDir": true,
 	"importMap": "./import_map.json"
 }
