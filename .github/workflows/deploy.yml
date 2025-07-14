@@ -29,6 +29,9 @@ jobs:
           SECRETS_DATA: ${{ secrets.SECRETS_CONFIG_JSON }}
         run: echo "$SECRETS_DATA" > secrets.config.json
 
+      - name: Remove existing lockfile to avoid version conflicts
+        run: rm -f deno.lock
+
       - name: Build configuration module
         run: deno run -A build.ts
 
