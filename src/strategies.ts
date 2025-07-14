@@ -133,35 +133,7 @@ export class GeminiOpenAIStrategy implements RequestHandlerStrategy {
         return headers;
     }
 
-    async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null> {
-        if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD' || !ctx.originalRequest.body) {
-            return null;
-        }
-        try {
-            const body: Record<string, any> = await ctx.originalRequest.json();
-
-            // To enforce our safety policy, we ensure the path to safety_settings exists.
-            // This aligns with the gateway's role: transparently proxying while applying specific, mandatory policies.
-            // 确保 extra_body 和 google 路径存在，以便强制执行安全策略
-            const extraBody = body.extra_body = body.extra_body ?? {};
-            const google = extraBody.google = extraBody.google ?? {};
-
-            // 强制覆盖安全设置
-            google.safety_settings = [
-                { "category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF" },
-                { "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF" },
-                { "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF" },
-                { "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF" },
-            ];
-
-            return JSON.stringify(body);
-        } catch (e) {
-            console.error("Gemini OpenAI: Failed to parse or modify request body:", e);
-            // If parsing fails, we cannot modify it, but we can try to pass it through.
-            // However, it's safer to return an error as the body is likely malformed.
-            throw new Response("Invalid JSON in request body.", { status: 400 });
-        }
-    }
+    processRequestBody(ctx: StrategyContext) { return ctx.originalRequest.body; }
 
     async handleResponse(res: Response, ctx: StrategyContext): Promise<Response> {
         if (!ctx.path.endsWith('/models') || !res.headers.get("content-type")?.includes("json")) return res;

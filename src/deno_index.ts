@@ -74,8 +74,8 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
         let bodyBufferPromise: Promise<ArrayBuffer | null> | null = null;
         let requestForFirstAttempt = originalReq;
 
-        // 只有在需要重试的请求方法中才缓存 body
-        if (originalReq.body && (originalReq.method === 'POST' || originalReq.method === 'PUT' || originalReq.method === 'PATCH')) {
+        // 为了支持重试，任何带有 body 的请求都必须被缓存，因为 body 流只能被消费一次。
+        if (originalReq.body) {
             const [stream1, stream2] = originalReq.body.tee();
             requestForFirstAttempt = new Request(originalReq, { body: stream1 });
             bodyBufferPromise = (async () => {
@@ -125,38 +125,10 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
                     Promise.resolve(strategy.buildRequestHeaders(context, auth))
                 ]);
 
-                // --- 调试日志：打印即将发送的完整请求 ---
-                console.log("==================== Outgoing Request ====================");
-                console.log(`--> ${currentRequest.method} ${targetUrl.toString()}`);
-                console.log("Headers:", Object.fromEntries(targetHeaders.entries()));
-                
-                let finalTargetBody = targetBody; // 用于 fetch 的 body
-                if (targetBody instanceof ReadableStream) {
-                    const [logStream, fetchStream] = targetBody.tee();
-                    finalTargetBody = fetchStream;
-                    const bodyText = await new Response(logStream).text();
-                    try {
-                        console.log("Body:", JSON.parse(bodyText));
-                    } catch {
-                        console.log("Body (non-JSON):", bodyText);
-                    }
-                } else if (typeof targetBody === 'string') {
-                    try {
-                        console.log("Body:", JSON.parse(targetBody));
-                    } catch {
-                        console.log("Body (non-JSON):", targetBody);
-                    }
-                } else if (targetBody) {
-                    console.log("Body: [Unsupported BodyInit type for logging]");
-                } else {
-                    console.log("Body: [Empty]");
-                }
-                console.log("==========================================================");
-
                 const res = await fetch(targetUrl, {
                     method: currentRequest.method,
                     headers: targetHeaders,
-                    body: finalTargetBody,
+                    body: targetBody,
                     signal: currentRequest.signal,
                 });
 
@@ -164,10 +136,6 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
                     const errorBodyText = await res.text();
                     console.error(`Upstream request to ${targetUrl.hostname} FAILED. Status: ${res.status}. Body: ${errorBodyText}`);
                     lastError = new Response(errorBodyText, { status: res.status, statusText: res.statusText, headers: res.headers });
-                    // 对于客户端错误 (4xx)，除非是 429 (Too Many Requests)，否则不应重试
-                    if (res.status >= 400 && res.status < 500 && res.status !== 429) {
-                        break;
-                    }
                     if (attempts >= maxRetries) break; else continue;
                 }
                 
@@ -183,7 +151,6 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
                     lastError = error;
                     // 确保消费或取消 body，避免 Deno 中的资源泄漏警告
                     if (error.body && !error.bodyUsed) await error.body.cancel();
-                    if (error.status >= 400 && error.status < 500) break;
                     if (attempts >= maxRetries) break; else continue;
                 }
                 // 重新抛出未被捕获的严重错误
