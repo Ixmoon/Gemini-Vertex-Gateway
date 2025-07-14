@@ -1,16 +1,18 @@
 // src/strategies.ts
 //
 // 该文件包含了所有请求处理策略 (RequestHandlerStrategy) 的具体实现。
-// 每个策略类都封装了与特定后端服务（如 Vertex AI, Gemini, 或通用代理）
-// 通信所需的所有逻辑，包括认证、URL 构建、请求/响应处理等。
+// 每个策略类都封装了与特定后端服务（如 Vertex AI, Gemini）通信所需的所有逻辑。
 //
-// 设计模式: 策略模式 (Strategy Pattern)
-// 通过将每个后端服务的处理逻辑封装在独立的策略类中，我们可以轻松地扩展
-// 以支持新的服务，而无需修改核心的路由和请求处理代码。
+// 核心设计理念：
+// 1. **策略模式**: 每个后端服务对应一个策略类，实现了 `RequestHandlerStrategy` 接口。
+// 2. **无状态与通用性**: 策略实现不依赖任何特定于下游服务的复杂类型定义。
+//    请求体（body）被当作通用的 `Record<string, any>` 对象处理，
+//    服务只在必要时（如修改、添加字段）关心其结构，实现了最大程度的解耦。
+// 3. **职责单一**: 每个策略只负责认证、URL构建、头信息处理和必要的请求/响应转换。
 
 import type { Context } from "hono";
 import type { AppConfig } from "./managers.ts";
-import type { AuthenticationDetails, GeminiModel, ModelProviderRequestBody, RequestHandlerStrategy, StrategyContext } from "./types.ts";
+import type { AuthenticationDetails, RequestHandlerStrategy, StrategyContext } from "./types.ts";
 import { getApiKeyFromReq, buildBaseProxyHeaders, _getGeminiAuthDetails } from "./auth.ts";
 
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
@@ -69,7 +71,7 @@ export class VertexAIStrategy implements RequestHandlerStrategy {
             return null;
         }
         try {
-            const bodyToModify = await ctx.originalRequest.json() as ModelProviderRequestBody;
+            const bodyToModify: Record<string, any> = await ctx.originalRequest.json();
             if (typeof bodyToModify !== 'object' || bodyToModify === null) {
                 return JSON.stringify(bodyToModify);
             }
@@ -107,7 +109,7 @@ export class GeminiOpenAIStrategy implements RequestHandlerStrategy {
     async getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
         // Clone the request to read the body, allowing the original body to be streamed later.
         const reqClone = ctx.originalRequest.clone();
-        const model = reqClone.body ? (await reqClone.json().catch(() => ({})) as ModelProviderRequestBody).model ?? null : null;
+        const model = reqClone.body ? (await reqClone.json().catch(() => ({})) as Record<string, any>).model ?? null : null;
         return _getGeminiAuthDetails(c, model, attempt, "Gemini OpenAI");
     }
     buildTargetUrl(ctx: StrategyContext): URL {
@@ -130,13 +132,43 @@ export class GeminiOpenAIStrategy implements RequestHandlerStrategy {
         if (auth.key) headers.set('Authorization', `Bearer ${auth.key}`);
         return headers;
     }
-    processRequestBody(ctx: StrategyContext) { return ctx.originalRequest.body; }
+
+    async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null> {
+        if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD' || !ctx.originalRequest.body) {
+            return null;
+        }
+        try {
+            const body: Record<string, any> = await ctx.originalRequest.json();
+
+            // To enforce our safety policy, we ensure the path to safety_settings exists.
+            // This aligns with the gateway's role: transparently proxying while applying specific, mandatory policies.
+            // 确保 extra_body 和 google 路径存在，以便强制执行安全策略
+            const extraBody = body.extra_body = body.extra_body ?? {};
+            const google = extraBody.google = extraBody.google ?? {};
+
+            // 强制覆盖安全设置
+            google.safety_settings = [
+                { "category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF" },
+                { "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF" },
+                { "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF" },
+                { "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF" },
+            ];
+
+            return JSON.stringify(body);
+        } catch (e) {
+            console.error("Gemini OpenAI: Failed to parse or modify request body:", e);
+            // If parsing fails, we cannot modify it, but we can try to pass it through.
+            // However, it's safer to return an error as the body is likely malformed.
+            throw new Response("Invalid JSON in request body.", { status: 400 });
+        }
+    }
+
     async handleResponse(res: Response, ctx: StrategyContext): Promise<Response> {
         if (!ctx.path.endsWith('/models') || !res.headers.get("content-type")?.includes("json")) return res;
         try {
             const body = await res.json();
             if (body?.data?.length) {
-                body.data.forEach((m: GeminiModel) => {
+                body.data.forEach((m: Record<string, any>) => {
                     if (m.id?.startsWith('models/')) {
                         m.id = m.id.slice(7);
                     }

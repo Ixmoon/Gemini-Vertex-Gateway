@@ -1,8 +1,11 @@
 // src/types.ts
 //
-// 该文件定义了整个应用中共享的所有核心 TypeScript 类型和接口。
-// 将类型定义集中在此处，可以提高代码的模块化和可维护性，
-// 并避免在不同文件之间出现循环依赖问题。
+// 该文件定义了整个应用中共享的核心、通用的 TypeScript 类型和接口。
+// 为了保持服务的简洁性和避免过度设计，此文件已移除了所有特定于
+// 下游服务（如 Google Gemini）的、非必需的类型定义。
+// 职责：
+// 1. 定义认证、配置等核心数据结构。
+// 2. 定义策略模式所需的核心接口 (`RequestHandlerStrategy`)。
 
 // =================================================================================
 // --- 1. 核心业务类型 ---
@@ -65,31 +68,4 @@ export interface RequestHandlerStrategy {
     processRequestBody(ctx: StrategyContext): Promise<BodyInit | null> | BodyInit | null;
     /** (可选) 在收到目标服务响应后，返回给客户端之前进行处理 */
     handleResponse?(res: Response, ctx: StrategyContext): Promise<Response>;
-}
-
-// =================================================================================
-// --- 3. 特定于模型的请求/响应体类型 ---
-// =================================================================================
-
-/** Google 安全设置 */
-interface GoogleSafetySetting {
-    category: string;
-    threshold: string;
-}
-
-/** Google 特定设置 */
-interface GoogleSpecificSettings {
-    safety_settings?: GoogleSafetySetting[];
-}
-
-/** 包含模型供应商特定字段的请求体 */
-export interface ModelProviderRequestBody {
-    model?: string;
-    reasoning_effort?: string; // Vertex AI specific
-    google?: GoogleSpecificSettings; // Vertex AI specific
-}
-
-/** Gemini 模型列表接口中的模型对象 */
-export interface GeminiModel {
-    id: string;
 }

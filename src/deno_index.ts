@@ -1,16 +1,16 @@
 // src/deno_index.ts
 //
-// 该文件是 LLM 网关服务的核心入口点。重构后的主要职责包括：
-// 1. 使用 Hono 框架设置 Web 服务器。
-// 2. 定义核心路由，包括根路径、robots.txt 和通配符代理路径。
-// 3. 实现主请求处理函数 `handleGenericProxy`，它作为所有代理请求的中央协调器。
-// 4. 实现一个请求类型判断函数 `determineRequestType`，根据请求路径决定使用哪种处理策略。
-// 5. 从其他模块（如 `managers`）导入并协调使用核心管理器（如 `strategyManager`）。
-// 6. 启动 Deno 服务器。
+// 该文件是 LLM 网关服务的核心入口和请求协调器。
 //
-// 该文件不再包含具体的业务逻辑实现（如策略、认证、工具类），这些都已解耦到
-// 各自的模块中 (`strategies.ts`, `auth.ts`, `utils.ts`, `managers.ts`)，
-// 使得此入口文件更轻量、更专注。
+// 核心职责:
+// 1. **服务器设置**: 使用 Hono 框架初始化 Web 服务器并定义路由。
+// 2. **请求分发**: `determineRequestType` 函数根据请求 URL 识别出请求类型。
+// 3. **中央处理**: `handleGenericProxy` 作为所有代理请求的统一入口点，它：
+//    a. 从 `strategyManager` 获取对应的处理策略。
+//    b. 管理请求重试逻辑，包括对请求体的缓存。
+//    c. 调用策略的不同方法来构建和发送对下游服务的请求。
+// 4. **解耦**: 此文件不包含任何具体的业务逻辑（如认证、URL 构建），
+//    所有具体实现都已解耦到 `strategies.ts`, `auth.ts`, `managers.ts` 等模块中。
 
 import { Hono, Context } from "hono";
 import { configManager, strategyManager } from "./managers.ts";
