@@ -129,15 +129,25 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
                 console.log("==================== Outgoing Request ====================");
                 console.log(`--> ${currentRequest.method} ${targetUrl.toString()}`);
                 console.log("Headers:", Object.fromEntries(targetHeaders.entries()));
-                // 为了日志可读性，只在 body 是字符串时打印其内容
-                if (typeof targetBody === 'string') {
+                
+                let finalTargetBody = targetBody; // 用于 fetch 的 body
+                if (targetBody instanceof ReadableStream) {
+                    const [logStream, fetchStream] = targetBody.tee();
+                    finalTargetBody = fetchStream;
+                    const bodyText = await new Response(logStream).text();
+                    try {
+                        console.log("Body:", JSON.parse(bodyText));
+                    } catch {
+                        console.log("Body (non-JSON):", bodyText);
+                    }
+                } else if (typeof targetBody === 'string') {
                     try {
                         console.log("Body:", JSON.parse(targetBody));
                     } catch {
                         console.log("Body (non-JSON):", targetBody);
                     }
                 } else if (targetBody) {
-                    console.log("Body: [ReadableStream or other BodyInit type]");
+                    console.log("Body: [Unsupported BodyInit type for logging]");
                 } else {
                     console.log("Body: [Empty]");
                 }
@@ -146,7 +156,7 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
                 const res = await fetch(targetUrl, {
                     method: currentRequest.method,
                     headers: targetHeaders,
-                    body: targetBody,
+                    body: finalTargetBody,
                     signal: currentRequest.signal,
                 });
 
