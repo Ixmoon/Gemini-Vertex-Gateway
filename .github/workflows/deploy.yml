@@ -3,6 +3,7 @@
 name: llm api gateway
 
 on:
+  workflow_dispatch: # 允许手动触发
   push:
     branches:
       - main  # 只在代码被推送到 main 分支时触发
