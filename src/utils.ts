@@ -3,103 +3,73 @@
 // 该文件包含整个应用可重用的通用工具函数和类。
 
 /**
- * DeterministicShufflingSelector 类实现了一个无状态但确定性的选择逻辑。
- * 它非常适合 Deno Deploy 等无状态环境，同时提供了比纯随机更好的分发均匀性。
+ * OptimizedRoundRobinSelector 类为单实例、有状态的场景实现了一个高效的、
+ * 不重复的随机轮询选择器。
+ *
+ * 核心优化:
+ * 1. **O(1) 复杂度**: 使用索引 (`currentIndex`) 代替 `Array.prototype.shift()`，
+ *    将 `next()` 操作的时间复杂度从 O(n) 降低到 O(1)。
+ * 2. **低内存占用**: 只维护一个洗牌后的列表和一个索引，避免了多个数组的开销。
  *
  * 工作原理:
- * 1. **时间窗口**: 它使用一个离散的时间窗口（例如每10分钟）作为种子。
- * 2. **确定性洗牌**: 它使用一个确定性的伪随机数生成器 (PRNG)，根据时间种子对原始列表进行洗牌。
- *    这意味着在同一个时间窗口内，列表的“随机”顺序是固定的。
- * 3. **基于 Key 的选择**: 它使用传入的 key (例如用户 API Key) 的哈希值，从洗牌后的列表中选择一个稳定的项。
- *
- * 优点:
- * - **无状态**: 无需在请求之间存储状态。
- * - **均匀负载**: 随着时间窗口的变化，密钥分发是均匀的。
- * - **请求稳定性**: 同一个用户在同一个时间窗口内会稳定地命中同一个后端密钥。
+ * 1. 在初始化时，它会对原始列表进行一次高质量的随机洗牌。
+ * 2. 每次调用 `next()`，它会返回当前索引处的元素，然后将索引递增。
+ * 3. 当所有元素都分发完毕后，它会自动重新洗牌并重置索引，开始新的一个周期。
  */
-export class DeterministicShufflingSelector<T> {
+export class OptimizedRoundRobinSelector<T> {
     private items: T[];
-    private timeSlotMinutes: number;
-    private cache: { seed: number; shuffledItems: T[] } | null = null;
+    private shuffledItems: T[];
+    private currentIndex: number;
 
-    constructor(items: T[], timeSlotMinutes = 10) {
+    constructor(items: T[]) {
         this.items = [...items];
-        this.timeSlotMinutes = timeSlotMinutes;
+        this.shuffledItems = this._shuffle([...this.items]);
+        this.currentIndex = 0;
     }
 
     /**
-     * 将字符串转换为一个简单的、不安全的哈希值（整数）。
-     * @param str 输入字符串
-     * @returns 一个整数哈希值
+     * 使用 Fisher-Yates 洗牌算法和密码学安全随机数生成器 (crypto.getRandomValues) 随机打乱数组。
+     * @param array 要打乱的数组。
+     * @returns 打乱后的新数组。
      */
-    private _stringToHash(str: string): number {
-        let hash = 0;
-        for (let i = 0; i < str.length; i++) {
-            const char = str.charCodeAt(i);
-            hash = (hash << 5) - hash + char;
-            hash |= 0; // 转换为 32 位有符号整数
-        }
-        return Math.abs(hash);
-    }
-
-    /**
-     * 使用 LCG (线性同余) 伪随机数生成器和一个种子，对数组进行确定性洗牌。
-     * @param array 要洗牌的数组
-     * @param seed 随机数生成器的种子
-     * @returns 洗牌后的新数组
-     */
-    private _deterministicShuffle(array: T[], seed: number): T[] {
-        const shuffled = [...array];
-        let currentIndex = shuffled.length;
-
-        // LCG PRNG
-        const a = 1664525;
-        const c = 1013904223;
-        const m = 2 ** 32;
-        let randomSeed = seed;
-
-        const nextRandom = () => {
-            randomSeed = (a * randomSeed + c) % m;
-            return randomSeed / m;
-        };
+    private _shuffle(array: T[]): T[] {
+        let currentIndex = array.length;
+        const randomValues = new Uint32Array(1);
 
         while (currentIndex !== 0) {
-            const randomIndex = Math.floor(nextRandom() * currentIndex);
+            crypto.getRandomValues(randomValues);
+            const randomIndex = randomValues[0] % currentIndex;
             currentIndex--;
-            [shuffled[currentIndex], shuffled[randomIndex]] = [shuffled[randomIndex], shuffled[currentIndex]];
+            [array[currentIndex], array[randomIndex]] = [array[randomIndex], array[currentIndex]];
         }
-        return shuffled;
+        return array;
     }
 
     /**
-     * 根据给定的 key，从列表中确定性地选择一个元素。
-     * @param key 用于确定选择的字符串，例如用户 API Key。
-     * @returns 列表中的一个元素，如果列表为空则返回 undefined。
+     * 高效地获取下一个可用元素。
+     * @returns 下一个元素，如果原始列表为空则返回 undefined。
      */
-    public next(key: string): T | undefined {
+    public next(): T | undefined {
         if (this.items.length === 0) {
             return undefined;
         }
 
-        // 1. 计算当前时间窗口作为洗牌的种子
-        const now = Date.now();
-        const timeSlotInMillis = this.timeSlotMinutes * 60 * 1000;
-        const timeSeed = Math.floor(now / timeSlotInMillis);
-
-        // 2. 检查缓存
-        if (this.cache && this.cache.seed === timeSeed) {
-            // 缓存命中，直接使用缓存的结果
-        } else {
-            // 缓存未命中或已过期，重新洗牌并更新缓存
-            const shuffled = this._deterministicShuffle(this.items, timeSeed);
-            this.cache = { seed: timeSeed, shuffledItems: shuffled };
+        if (this.currentIndex >= this.shuffledItems.length) {
+            // 所有元素都已用完，重置并重新洗牌
+            this.shuffledItems = this._shuffle([...this.items]);
+            this.currentIndex = 0;
         }
-        const shuffledItems = this.cache.shuffledItems;
 
-        // 3. 使用输入 key 的哈希值从洗牌后的列表中选择一项
-        const keyHash = this._stringToHash(key);
-        const index = keyHash % shuffledItems.length;
+        const selected = this.shuffledItems[this.currentIndex];
+        this.currentIndex++;
+        return selected;
+    }
 
-        return shuffledItems[index];
+    /**
+     * 强制重置选择器，重新洗牌并从头开始。
+     */
+    public reset(): void {
+        this.shuffledItems = this._shuffle([...this.items]);
+        this.currentIndex = 0;
     }
 }

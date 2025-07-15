@@ -17,7 +17,7 @@
 import { GoogleAuth } from "google-auth-library";
 import * as configData from "./config_data.ts";
 import type { GcpCredentials, RequestHandlerStrategy, RequestType } from "./types.ts";
-import { DeterministicShufflingSelector } from "./utils.ts";
+import { OptimizedRoundRobinSelector } from "./utils.ts";
 import { VertexAIStrategy, GeminiOpenAIStrategy, GeminiNativeStrategy, GenericProxyStrategy } from "./strategies.ts";
 
 // =================================================================================
@@ -120,9 +120,7 @@ const gcpAuthManager = new LazyManager<GcpAuth>(() => {
     if (credentials.length === 0) {
         console.warn("[GCP] No valid GCP credentials found in the configuration.");
     }
-    // 对于 GCP 凭证，我们使用一个固定的 key，因为没有用户特定的标识符。
-    // 这仍然能从基于时间的洗牌中受益。
-    const credentialSelector = new DeterministicShufflingSelector(credentials);
+    const credentialSelector = new OptimizedRoundRobinSelector(credentials);
 
     const getAuthInstance = (credential: GcpCredentials): GoogleAuth => {
         if (!authInstanceCache.has(credential.client_email)) {
@@ -134,9 +132,8 @@ const gcpAuthManager = new LazyManager<GcpAuth>(() => {
         return authInstanceCache.get(credential.client_email)!;
     };
 
-    const getAuth = async (): Promise<{ token:string; projectId: string } | null> => {
-        // 使用一个固定的 key 来确保在同一个时间窗口内选择是稳定的
-        const selectedCredential = credentialSelector.next("gcp-credential-selector");
+    const getAuth = async (): Promise<{ token: string; projectId: string } | null> => {
+        const selectedCredential = credentialSelector.next();
         if (!selectedCredential) return null;
 
         try {
@@ -212,4 +209,4 @@ class StrategyManager {
 
 export { configManager, gcpAuthManager };
 export const strategyManager = new StrategyManager();
-export const poolKeySelector = new DeterministicShufflingSelector(configManager.getSync().poolKeys);
+export const poolKeySelector = new OptimizedRoundRobinSelector(configManager.getSync().poolKeys);

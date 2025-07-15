@@ -72,7 +72,7 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
         const strategy = await strategyManager.get(type);
 
         // --- Unified Body Caching & Parsing ---
-        const MAX_BUFFER_SIZE_BYTES = 10 * 1024 * 1024; // 10MB
+        const MAX_BUFFER_SIZE_BYTES = 1 * 1024 * 1024; // 1MB
         let bodyBuffer: ArrayBuffer | null = null;
         let parsedBody: Record<string, any> | null = null;
         let retriesEnabled = false;

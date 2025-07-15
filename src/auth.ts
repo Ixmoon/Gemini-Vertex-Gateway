@@ -46,8 +46,8 @@ const getApiKeyForRequest = (userKey: string | null, model: string | null): ApiK
     if (model && config.fallbackModels.has(model.trim())) {
         if (config.fallbackKey) return { key: config.fallbackKey, source: 'fallback' };
     }
-    // 否则，使用用户密钥作为种子，从密钥池中确定性地取一个密钥
-    const poolKey = poolKeySelector.next(userKey);
+    // 否则，从密钥池中取一个密钥
+    const poolKey = poolKeySelector.next();
     if (poolKey) return { key: poolKey, source: 'pool' };
     // 如果密钥池也用尽，则返回 null
     return null;
@@ -74,11 +74,8 @@ export const _getGeminiAuthDetails = (c: Context, model: string | null, attempt:
         result = getApiKeyForRequest(userApiKey, model);
         if (!result && !isModels) throw new Response(`No valid API key (${name})`, { status: 401 });
     } else if (userApiKey && config.triggerKeys.has(userApiKey)) {
-        // 重试时，如果用户是触发密钥，则使用用户密钥作为种子尝试从池中获取下一个密钥
-        // 注意：由于选择是确定性的，这实际上会返回与第一次尝试相同的池密钥。
-        // 一个更高级的实现可能会将 'attempt' 数也纳入 key/seed，例如 `next(userApiKey + ':' + attempt)`
-        // 但为了保持简单，我们暂时接受这种行为。
-        const poolKey = poolKeySelector.next(userApiKey);
+        // 重试时，如果用户是触发密钥，则尝试从池中获取下一个密钥
+        const poolKey = poolKeySelector.next();
         if (poolKey) {
             result = { key: poolKey, source: 'pool' };
         } else if (!isModels) {
