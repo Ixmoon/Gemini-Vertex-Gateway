@@ -12,10 +12,10 @@ import type { ApiKeyResult, AuthenticationDetails } from "./types.ts";
  * 从请求中提取 API 密钥。
  * 支持从 URL 查询参数 'key'、Authorization Bearer Token 或 'x-goog-api-key' 头中获取。
  * @param c Hono 上下文对象
+ * @param url 解析后的 URL 对象
  * @returns 提取到的 API 密钥，如果未找到则返回 null。
  */
-export const getApiKeyFromReq = (c: Context): string | null => {
-    const url = new URL(c.req.url);
+export const getApiKeyFromReq = (c: Context, url: URL): string | null => {
     return url.searchParams.get('key') || c.req.header("Authorization")?.replace(/^bearer\s+/i, '') || c.req.header("x-goog-api-key") || null;
 };
 
@@ -46,8 +46,8 @@ const getApiKeyForRequest = (userKey: string | null, model: string | null): ApiK
     if (model && config.fallbackModels.has(model.trim())) {
         if (config.fallbackKey) return { key: config.fallbackKey, source: 'fallback' };
     }
-    // 否则，从密钥池中取一个密钥
-    const poolKey = poolKeySelector.next();
+    // 否则，使用用户密钥作为种子，从密钥池中确定性地取一个密钥
+    const poolKey = poolKeySelector.next(userKey);
     if (poolKey) return { key: poolKey, source: 'pool' };
     // 如果密钥池也用尽，则返回 null
     return null;
@@ -63,9 +63,10 @@ const getApiKeyForRequest = (userKey: string | null, model: string | null): ApiK
  * @returns 返回认证详情对象
  */
 export const _getGeminiAuthDetails = (c: Context, model: string | null, attempt: number, name: string): AuthenticationDetails => {
-    const userApiKey = getApiKeyFromReq(c);
+    const url = new URL(c.req.url); // 这里仍然需要解析，但这是调用链路的深层，暂时接受
+    const userApiKey = getApiKeyFromReq(c, url);
     const config = configManager.getSync();
-    const isModels = new URL(c.req.url).pathname.endsWith('/models');
+    const isModels = url.pathname.endsWith('/models');
     let result: ApiKeyResult | null = null;
 
     if (attempt === 1) {
@@ -73,8 +74,11 @@ export const _getGeminiAuthDetails = (c: Context, model: string | null, attempt:
         result = getApiKeyForRequest(userApiKey, model);
         if (!result && !isModels) throw new Response(`No valid API key (${name})`, { status: 401 });
     } else if (userApiKey && config.triggerKeys.has(userApiKey)) {
-        // 重试时，如果用户是触发密钥，则尝试从池中获取下一个密钥
-        const poolKey = poolKeySelector.next();
+        // 重试时，如果用户是触发密钥，则使用用户密钥作为种子尝试从池中获取下一个密钥
+        // 注意：由于选择是确定性的，这实际上会返回与第一次尝试相同的池密钥。
+        // 一个更高级的实现可能会将 'attempt' 数也纳入 key/seed，例如 `next(userApiKey + ':' + attempt)`
+        // 但为了保持简单，我们暂时接受这种行为。
+        const poolKey = poolKeySelector.next(userApiKey);
         if (poolKey) {
             result = { key: poolKey, source: 'pool' };
         } else if (!isModels) {

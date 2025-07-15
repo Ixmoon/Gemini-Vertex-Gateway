@@ -41,12 +41,14 @@ export interface AuthenticationDetails {
     maxRetries: number;
 }
 
-/** 策略模式的上下文对象，封装了处理请求所需的所有原始信息 */
+/** 策略模式的上下文对象，封装了处理请求所需的所有信息 */
 export interface StrategyContext {
     originalUrl: URL;
     originalRequest: Request;
     path: string;
     prefix: string | null;
+    /** 如果请求体被缓存，这里是解析后的 JSON 对象 */
+    parsedBody: Record<string, any> | null;
 }
 
 // =================================================================================
@@ -64,8 +66,8 @@ export interface RequestHandlerStrategy {
     buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL | Promise<URL>;
     /** 构建发往目标服务的请求头 */
     buildRequestHeaders(ctx: StrategyContext, auth: AuthenticationDetails): Headers;
-    /** 处理和转换请求体 */
-    processRequestBody(ctx: StrategyContext): Promise<BodyInit | null> | BodyInit | null;
+    /** (可选) 转换已解析的请求体对象 */
+    transformRequestBody?(body: Record<string, any> | null, ctx: StrategyContext): Record<string, any> | null;
     /** (可选) 在收到目标服务响应后，返回给客户端之前进行处理 */
     handleResponse?(res: Response, ctx: StrategyContext): Promise<Response>;
 }

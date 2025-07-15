@@ -21,12 +21,12 @@ import type { RequestType, StrategyContext } from "./types.ts";
 // =================================================================================
 
 /**
- * 根据请求路径确定请求类型和相关细节。
- * @param req Hono 请求对象
+ * 根据请求的 URL 对象确定请求类型和相关细节。
+ * @param url 解析后的 URL 对象
  * @returns 返回一个包含请求类型、路径前缀和处理路径的对象。
  */
-const determineRequestType = (req: Request): { type: RequestType | "UNKNOWN", prefix: string | null, path: string } => {
-    const { pathname } = new URL(req.url);
+const determineRequestType = (url: URL): { type: RequestType | "UNKNOWN", prefix: string | null, path: string } => {
+    const { pathname } = url;
 
     // 1. Vertex AI 的路径有特殊前缀
     if (pathname.startsWith('/vertex/')) {
@@ -61,75 +61,87 @@ const determineRequestType = (req: Request): { type: RequestType | "UNKNOWN", pr
  */
 const handleGenericProxy = async (c: Context): Promise<Response> => {
     const originalReq = c.req.raw;
-    const { type, ...details } = determineRequestType(originalReq);
+    const url = new URL(originalReq.url); // --- 只解析一次 URL ---
+    const { type, ...details } = determineRequestType(url);
 
     if (type === "UNKNOWN") {
-        return c.json({ error: `No route for path: ${new URL(originalReq.url).pathname}` }, 404);
+        return c.json({ error: `No route for path: ${url.pathname}` }, 404);
     }
 
     try {
         const strategy = await strategyManager.get(type);
 
-        // --- Body Caching Logic for Retries ---
-        let bodyBufferPromise: Promise<ArrayBuffer | null> | null = null;
-        let requestForFirstAttempt = originalReq;
+        // --- Unified Body Caching & Parsing ---
+        const MAX_BUFFER_SIZE_BYTES = 10 * 1024 * 1024; // 10MB
+        let bodyBuffer: ArrayBuffer | null = null;
+        let parsedBody: Record<string, any> | null = null;
+        let retriesEnabled = false;
 
-        // 为了支持重试，任何带有 body 的请求都必须被缓存，因为 body 流只能被消费一次。
         if (originalReq.body) {
-            const [stream1, stream2] = originalReq.body.tee();
-            requestForFirstAttempt = new Request(originalReq, { body: stream1 });
-            bodyBufferPromise = (async () => {
+            const contentLength = parseInt(originalReq.headers.get('content-length') || '0', 10);
+            if (contentLength > 0 && contentLength < MAX_BUFFER_SIZE_BYTES) {
                 try {
-                    return await new Response(stream2).arrayBuffer();
+                    bodyBuffer = await originalReq.arrayBuffer();
+                    retriesEnabled = true;
+                    if (originalReq.headers.get('content-type')?.includes('application/json')) {
+                        // 使用 TextDecoder 将 ArrayBuffer 转换为字符串
+                        const bodyText = new TextDecoder().decode(bodyBuffer);
+                        parsedBody = JSON.parse(bodyText);
+                    }
                 } catch (e) {
-                    console.error("Error buffering request body:", e);
-                    return null; // 如果缓存失败则返回 null
+                    console.error("Error buffering or parsing request body:", e);
+                    return c.json({ error: "Invalid request body provided." }, 400);
                 }
-            })();
+            } else {
+                if (contentLength >= MAX_BUFFER_SIZE_BYTES) {
+                    console.warn(`Request body size (${contentLength} bytes) exceeds limit. Retries disabled.`);
+                } else {
+                     console.warn(`Request body size is unknown or zero. Retries disabled.`);
+                }
+            }
         }
-        // --- End of Body Caching Logic ---
+        // --- End of Unified Caching ---
 
         let attempts = 0, maxRetries = 1, lastError: Response | null = null;
 
         while (attempts < maxRetries) {
             attempts++;
             try {
-                let currentRequest = requestForFirstAttempt;
-                // 对于重试，使用缓存的 body
-                if (attempts > 1) {
-                    if (!bodyBufferPromise) {
-                        throw new Error("Cannot retry request: original body was not buffered.");
-                    }
-                    const bodyBuffer = await bodyBufferPromise;
-                    if (bodyBuffer === null) {
-                        throw new Error("Cannot retry request: body buffering failed.");
-                    }
-                    currentRequest = new Request(originalReq, { body: bodyBuffer });
+                // 对于重试，必须启用缓存
+                if (attempts > 1 && !retriesEnabled) {
+                    console.warn("Aborting retry: Retries are not enabled for this request.");
+                    break;
                 }
 
                 const context: StrategyContext = {
-                    originalUrl: new URL(currentRequest.url),
-                    originalRequest: currentRequest,
+                    originalUrl: url, // --- 复用已解析的 URL 对象 ---
+                    originalRequest: originalReq,
+                    parsedBody: parsedBody,
                     ...details
                 };
 
                 const auth = await strategy.getAuthenticationDetails(c, context, attempts);
-                
+
                 if (attempts === 1) {
-                    maxRetries = auth.maxRetries;
+                    // 只有当重试启用时，才设置大于1的 maxRetries
+                    maxRetries = retriesEnabled ? auth.maxRetries : 1;
                 }
 
-                const [targetUrl, targetBody, targetHeaders] = await Promise.all([
+                // --- Body Transformation ---
+                const transformedBody = strategy.transformRequestBody ? strategy.transformRequestBody(context.parsedBody, context) : context.parsedBody;
+                const finalBody = transformedBody ? JSON.stringify(transformedBody) : (bodyBuffer ?? null);
+                // --- End Body Transformation ---
+
+                const [targetUrl, targetHeaders] = await Promise.all([
                     Promise.resolve(strategy.buildTargetUrl(context, auth)),
-                    Promise.resolve(strategy.processRequestBody(context)),
                     Promise.resolve(strategy.buildRequestHeaders(context, auth))
                 ]);
 
                 const res = await fetch(targetUrl, {
-                    method: currentRequest.method,
+                    method: originalReq.method,
                     headers: targetHeaders,
-                    body: targetBody,
-                    signal: currentRequest.signal,
+                    body: finalBody,
+                    signal: originalReq.signal,
                 });
 
                 if (!res.ok) {
@@ -139,11 +151,7 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
                     if (attempts >= maxRetries) break; else continue;
                 }
                 
-                const finalContext: StrategyContext = {
-                    originalUrl: new URL(originalReq.url),
-                    originalRequest: originalReq,
-                    ...details
-                };
+                const finalContext: StrategyContext = { ...context, parsedBody: transformedBody };
                 return strategy.handleResponse ? await strategy.handleResponse(res, finalContext) : res;
 
             } catch (error) {

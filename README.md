@@ -150,3 +150,22 @@
 ---
 
 祝使用愉快！
+## 更新机密与重新部署
+
+当您在本地修改了 `secrets.config.json` 文件后，需要将这些更改同步到 GitHub Secrets 并触发一次新的部署。我们提供了一个批处理脚本来自动化这个流程。
+
+### 使用 `redeploy.bat` 脚本
+
+1.  **确保 GitHub CLI 已安装并登录**
+    *   如果您尚未安装 GitHub CLI，或者在终端中运行 `gh` 命令时提示找不到命令，请参考[官方文档](https://cli.github.com/)进行安装和配置。
+    *   确保您已经通过 `gh auth login` 成功登录。
+
+2.  **运行脚本**
+    *   在项目根目录，直接运行 `redeploy.bat` 文件。
+    *   您可以在 CMD 或 PowerShell 终端中执行 `./redeploy.bat`，或者直接在文件资源管理器中双击它。
+
+脚本会自动完成以下两件事：
+1.  将您本地 `secrets.config.json` 的内容更新到 GitHub 仓库中名为 `SECRETS_CONFIG_JSON` 的机密。
+2.  触发一次新的部署工作流，该工作流将使用您刚刚更新的机密。
+
+您可以在 GitHub 仓库的 "Actions" 选项卡中查看到新的部署进度。

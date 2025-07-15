@@ -150,3 +150,22 @@ This endpoint intelligently handles two types of requests:
 ---
 
 Happy proxying!
+## Updating Secrets and Redeploying
+
+When you modify the `secrets.config.json` file locally, you need to sync these changes to GitHub Secrets and trigger a new deployment. We provide a batch script to automate this process.
+
+### Using the `redeploy.bat` script
+
+1.  **Ensure GitHub CLI is installed and authenticated**
+    *   If you haven't installed GitHub CLI, or if the `gh` command is not found in your terminal, please refer to the [official documentation](https://cli.github.com/) for installation and setup.
+    *   Make sure you have successfully logged in via `gh auth login`.
+
+2.  **Run the script**
+    *   From the project root directory, simply run the `redeploy.bat` file.
+    *   You can execute `./redeploy.bat` in a CMD or PowerShell terminal, or by double-clicking it in the file explorer.
+
+The script will automatically perform the following two actions:
+1.  Update the repository secret named `SECRETS_CONFIG_JSON` with the content of your local `secrets.config.json`.
+2.  Trigger a new run of the deployment workflow, which will use the secret you just updated.
+
+You can monitor the progress of the new deployment in the "Actions" tab of your GitHub repository.

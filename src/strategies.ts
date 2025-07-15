@@ -30,8 +30,8 @@ export class VertexAIStrategy implements RequestHandlerStrategy {
         this.gcpAuth = gcpAuth;
     }
 
-    async getAuthenticationDetails(c: Context, _ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
-        const userKey = getApiKeyFromReq(c) || 'N/A';
+    async getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
+        const userKey = getApiKeyFromReq(c, ctx.originalUrl) || 'N/A';
         if (!this.config.triggerKeys.has(userKey)) {
             throw new Response("Forbidden: A valid trigger key is required for the /vertex endpoint.", { status: 403 });
         }
@@ -66,35 +66,26 @@ export class VertexAIStrategy implements RequestHandlerStrategy {
         return headers;
     }
 
-    async processRequestBody(ctx: StrategyContext): Promise<BodyInit | null> {
-        if (ctx.originalRequest.method === 'GET' || ctx.originalRequest.method === 'HEAD' || !ctx.originalRequest.body) {
-            return null;
+    transformRequestBody(body: Record<string, any> | null): Record<string, any> | null {
+        if (!body) return null;
+
+        const bodyToModify = { ...body };
+        if (bodyToModify.model && typeof bodyToModify.model === 'string' && !bodyToModify.model.startsWith('google/')) {
+            bodyToModify.model = `google/${bodyToModify.model}`;
         }
-        try {
-            const bodyToModify: Record<string, any> = await ctx.originalRequest.json();
-            if (typeof bodyToModify !== 'object' || bodyToModify === null) {
-                return JSON.stringify(bodyToModify);
-            }
-            if (bodyToModify.model && typeof bodyToModify.model === 'string' && !bodyToModify.model.startsWith('google/')) {
-                bodyToModify.model = `google/${bodyToModify.model}`;
-            }
-            if (bodyToModify.reasoning_effort === 'none') {
-                delete bodyToModify.reasoning_effort;
-            }
-            bodyToModify.google = {
-                ...(bodyToModify.google || {}),
-                safety_settings: [
-                    { "category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF" },
-                    { "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF" },
-                    { "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF" },
-                    { "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF" },
-                ]
-            };
-            return JSON.stringify(bodyToModify);
-        } catch (e) {
-            console.error("Vertex: Failed to parse request body from stream:", e);
-            throw new Response("Failed to parse request body for Vertex AI. Invalid JSON.", { status: 400 });
+        if (bodyToModify.reasoning_effort === 'none') {
+            delete bodyToModify.reasoning_effort;
         }
+        bodyToModify.google = {
+            ...(bodyToModify.google || {}),
+            safety_settings: [
+                { "category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF" },
+                { "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF" },
+                { "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF" },
+                { "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF" },
+            ]
+        };
+        return bodyToModify;
     }
 }
 
@@ -106,11 +97,9 @@ export class GeminiOpenAIStrategy implements RequestHandlerStrategy {
     // This strategy no longer needs AppConfig
     constructor() {}
 
-    async getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
-        // Clone the request to read the body, allowing the original body to be streamed later.
-        const reqClone = ctx.originalRequest.clone();
-        const model = reqClone.body ? (await reqClone.json().catch(() => ({})) as Record<string, any>).model ?? null : null;
-        return _getGeminiAuthDetails(c, model, attempt, "Gemini OpenAI");
+    getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
+        const model = ctx.parsedBody?.model ?? null;
+        return Promise.resolve(_getGeminiAuthDetails(c, model, attempt, "Gemini OpenAI"));
     }
     buildTargetUrl(ctx: StrategyContext): URL {
         // 从原始路径中移除可选的 /v1 前缀，以获得标准的 OpenAI 路径
@@ -133,7 +122,7 @@ export class GeminiOpenAIStrategy implements RequestHandlerStrategy {
         return headers;
     }
 
-    processRequestBody(ctx: StrategyContext) { return ctx.originalRequest.body; }
+    // No transformation needed for the request body
 
     async handleResponse(res: Response, ctx: StrategyContext): Promise<Response> {
         if (!ctx.path.endsWith('/models') || !res.headers.get("content-type")?.includes("json")) return res;
@@ -164,7 +153,11 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
     // This strategy no longer needs AppConfig
     constructor() {}
 
-    getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> { const model = ctx.path.match(/\/models\/([^:]+):/)?.[1] ?? null; return Promise.resolve(_getGeminiAuthDetails(c, model, attempt, "Gemini Native")); }
+    getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
+        // For native requests, the model is in the URL path, not the body.
+        const model = ctx.path.match(/\/models\/([^:]+):/)?.[1] ?? null;
+        return Promise.resolve(_getGeminiAuthDetails(c, model, attempt, "Gemini Native"));
+    }
     buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
         if (!auth.key) throw new Response("Gemini Native requires an API Key.", { status: 500 });
         const url = new URL(ctx.path, GEMINI_BASE_URL);
@@ -173,7 +166,7 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
         return url;
     }
     buildRequestHeaders(ctx: StrategyContext, _auth: AuthenticationDetails) { const h = buildBaseProxyHeaders(ctx.originalRequest.headers); h.delete('authorization'); h.delete('x-goog-api-key'); return h; }
-    processRequestBody(ctx: StrategyContext) { return ctx.originalRequest.body; }
+    // No transformation needed for the request body
 }
 
 // =================================================================================
@@ -195,5 +188,5 @@ export class GenericProxyStrategy implements RequestHandlerStrategy {
         return url;
     }
     buildRequestHeaders(ctx: StrategyContext, _auth: AuthenticationDetails) { return buildBaseProxyHeaders(ctx.originalRequest.headers); }
-    processRequestBody(ctx: StrategyContext) { return ctx.originalRequest.body; }
+    // No transformation needed for the request body
 }
