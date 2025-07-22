@@ -285,6 +285,32 @@ app.get('/', (c: Context) => c.text('LLM Gateway Service is running.'));
 app.get('/robots.txt', (c: Context) => c.text('User-agent: *\nDisallow: /'));
 
 // --- 通配符代理路由 ---
+
+app.put('/google-upload-proxy', async (c: Context): Promise<Response> => {
+    const target = c.req.query('target');
+    if (!target) {
+        return c.text('Missing "target" query parameter', 400);
+    }
+
+    try {
+        const decodedTarget = decodeURIComponent(target);
+
+        const res = await fetch(decodedTarget, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': c.req.header('Content-Type') || '',
+                'Content-Length': c.req.header('Content-Length') || '',
+            },
+            body: c.req.raw.body,
+        });
+
+        return res;
+    } catch (error) {
+        console.error(`Gemini upload proxy failed for target "${target}":`, error);
+        return c.text('Bad Gateway: Upstream request failed', 502);
+    }
+});
+
 app.all('/*', handleGenericProxy);
 
 // --- 全局错误处理 ---

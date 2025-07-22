@@ -200,6 +200,32 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
         return url;
     }
     // No transformation needed for the request body
+
+    async handleResponse(res: Response, ctx: StrategyContext): Promise<Response> {
+        const isUploadInit =
+            ctx.originalRequest.method === 'POST' &&
+            ctx.path.includes('/files') &&
+            res.headers.has('x-goog-upload-url');
+
+        if (isUploadInit) {
+            const newHeaders = new Headers(res.headers);
+            const originalUploadUrl = newHeaders.get('x-goog-upload-url');
+
+            if (originalUploadUrl) {
+                const encodedUrl = encodeURIComponent(originalUploadUrl);
+                const proxyUploadUrl = `/google-upload-proxy?target=${encodedUrl}`;
+                newHeaders.set('x-goog-upload-url', proxyUploadUrl);
+
+                return new Response(res.body, {
+                    status: res.status,
+                    statusText: res.statusText,
+                    headers: newHeaders,
+                });
+            }
+        }
+
+        return res;
+    }
 }
 
 // =================================================================================
