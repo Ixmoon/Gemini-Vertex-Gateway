@@ -255,12 +255,18 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
 
             } catch (error) {
                 if (error instanceof Response) {
-                    lastError = error;
-                    // 确保消费或取消 body，避免 Deno 中的资源泄漏警告
-                    if (error.body && !error.bodyUsed) await error.body.cancel();
+                    // 克隆响应以避免 "body already consumed" 错误。
+                    // 我们读取 body 文本，然后为 lastError 创建一个新的 Response 对象。
+                    const errorBodyText = await error.text(); // 消费原始错误响应的 body
+                    lastError = new Response(errorBodyText, { // 创建一个全新的响应
+                        status: error.status,
+                        statusText: error.statusText,
+                        headers: error.headers,
+                    });
+
                     if (attempts >= maxRetries) break; else continue;
                 }
-                // 重新抛出未被捕获的严重错误
+                // 如果不是 Response 实例，则重新抛出，因为这是意外错误。
                 throw error;
             }
         }
