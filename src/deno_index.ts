@@ -232,12 +232,17 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
                     Promise.resolve(strategy.buildRequestHeaders(context, auth))
                 ]);
 
+                console.log(`[PROXY REQUEST] --> ${originalReq.method} ${targetUrl.toString()}`);
+                console.log(`[PROXY REQUEST HEADERS] -->`, Object.fromEntries(targetHeaders.entries()));
+                
                 const res = await fetch(targetUrl, {
                     method: originalReq.method,
                     headers: targetHeaders,
                     body: finalBody,
                     signal: originalReq.signal,
                 });
+
+                console.log(`[PROXY RESPONSE] <-- ${res.status} ${res.statusText} From ${targetUrl.toString()}`);
 
                 if (!res.ok) {
                     const errorBodyText = await res.text();
