@@ -30,6 +30,15 @@ const determineRequestType = (c: Context): { type: RequestType | "UNKNOWN", pref
     const url = new URL(c.req.url);
     const { pathname } = url;
 
+    // 0. 检查特殊的 WebSocket (gRPC-Web) 路径
+    const wsPrefix = '/ws/google.ai.generativelanguage.';
+    if (pathname.startsWith(wsPrefix)) {
+        // e.g., /ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateMusic
+        // -> /v1alpha.GenerativeService.BidiGenerateMusic
+        const servicePath = pathname.slice(wsPrefix.length);
+        return { type: "GEMINI_NATIVE", prefix: '/ws', path: `/${servicePath}` };
+    }
+
     // 1. Vertex AI 的路径有特殊前缀
     if (pathname.startsWith('/vertex/')) {
         return { type: "VERTEX_AI", prefix: '/vertex', path: pathname.slice('/vertex'.length) };
@@ -40,9 +49,6 @@ const determineRequestType = (c: Context): { type: RequestType | "UNKNOWN", pref
         const prefix = '/gemini';
         const path = pathname.slice(prefix.length);
         
-        // 根据是否存在 Authorization: Bearer Header 来区分 OpenAI 兼容模式和原生模式
-        // 原生 API 使用 x-goog-api-key 或 ?key=
-        // OpenAI 兼容 API 使用 Authorization: Bearer
         const isGeminiOpenAI = !!c.req.header("Authorization")?.includes('Bearer');
         return { type: isGeminiOpenAI ? "GEMINI_OPENAI" : "GEMINI_NATIVE", prefix, path };
     }
