@@ -187,11 +187,7 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
         const h = buildBaseProxyHeaders(ctx.originalRequest.headers);
         h.delete('authorization'); h.delete('x-goog-api-key');
         if (auth.key) {
-            // The API key is not needed for the subsequent PUT requests in a resumable upload.
-            // The upload URL itself is the authentication mechanism.
-            if (!(ctx.originalRequest.method === 'PUT' && ctx.path.startsWith('/upload/'))) {
-                h.set('x-goog-api-key', auth.key);
-            }
+            h.set('x-goog-api-key', auth.key);
         }
         return h;
     }
@@ -221,8 +217,15 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
                 proxyUrl.pathname = `${ctx.prefix}${googleUploadUrl.pathname}`;
                 proxyUrl.search = googleUploadUrl.search;
 
+                // 将 API 密钥嵌入重写后的 URL，以便后续的 PUT 请求能够被认证。
+                const userApiKey = getApiKeyFromReq({ req: { header: (name: string) => ctx.originalRequest.headers.get(name) } } as Context, ctx.originalUrl);
+                if (userApiKey) {
+                    proxyUrl.searchParams.set('key', userApiKey);
+                }
+
                 const newHeaders = new Headers(res.headers);
                 newHeaders.set('x-goog-upload-url', proxyUrl.toString());
+                // Body 为空，但以防万一还是清理这些头。
                 newHeaders.delete('content-encoding');
                 newHeaders.delete('content-length');
 
@@ -233,6 +236,7 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
                 });
             } catch (e) {
                 console.error("Failed to rewrite x-goog-upload-url:", e);
+                // 失败时返回原始响应
                 return res;
             }
         }
