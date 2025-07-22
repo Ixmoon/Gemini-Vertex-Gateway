@@ -47,10 +47,7 @@ export const isStatefulRequest = (ctx: StrategyContext): boolean => {
 };
 
 export const buildBaseProxyHeaders = (h: Headers): Headers => {
-    const n = new Headers();
-    h.forEach((value, key) => {
-        n.set(key, value);
-    });
+    const n = new Headers(h);
     n.delete('host');
     return n;
 };

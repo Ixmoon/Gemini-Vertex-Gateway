@@ -49,16 +49,8 @@ const determineRequestType = (c: Context): { type: RequestType | "UNKNOWN", pref
         const prefix = '/gemini';
         const path = pathname.slice(prefix.length);
         
-        // Use a more robust method to differentiate between Native and OpenAI-compatible calls.
-        // OpenAI-compatible requests specifically target paths like '/chat/completions'.
-        const isOpenAICompatPath = path.includes('/chat/completions') || path.includes('/embeddings');
-        
-        if (isOpenAICompatPath) {
-            return { type: "GEMINI_OPENAI", prefix, path };
-        }
-        
-        // All other /gemini/ paths are considered native.
-        return { type: "GEMINI_NATIVE", prefix, path };
+        const isGeminiOpenAI = !!c.req.header("Authorization")?.includes('Bearer');
+        return { type: isGeminiOpenAI ? "GEMINI_OPENAI" : "GEMINI_NATIVE", prefix, path };
     }
 
     // 3. 检查通用 API 映射
@@ -179,27 +171,27 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
         let parsedBody: Record<string, any> | null = null;
         let retriesEnabled = false;
 
-        if (originalReq.body && !originalReq.bodyUsed) {
-            try {
-                bodyBuffer = await originalReq.arrayBuffer();
-
-                if (bodyBuffer.byteLength >= MAX_BUFFER_SIZE_BYTES) {
-                    console.warn(`Request body size (${bodyBuffer.byteLength} bytes) exceeds buffer limit. Retries disabled.`);
-                    retriesEnabled = false;
-                } else if (bodyBuffer.byteLength > 0) {
+        if (originalReq.body) {
+            const contentLength = parseInt(originalReq.headers.get('content-length') || '0', 10);
+            if (contentLength > 0 && contentLength < MAX_BUFFER_SIZE_BYTES) {
+                try {
+                    bodyBuffer = await originalReq.arrayBuffer();
                     retriesEnabled = true;
                     if (originalReq.headers.get('content-type')?.includes('application/json')) {
                         // 使用 TextDecoder 将 ArrayBuffer 转换为字符串
                         const bodyText = new TextDecoder().decode(bodyBuffer);
                         parsedBody = JSON.parse(bodyText);
                     }
-                } else {
-                    // Body is present but empty, disable retries.
-                    retriesEnabled = false;
+                } catch (e) {
+                    console.error("Error buffering or parsing request body:", e);
+                    return c.json({ error: "Invalid request body provided." }, 400);
                 }
-            } catch (e) {
-                console.error("Error buffering or parsing request body:", e);
-                return c.json({ error: "Invalid request body provided." }, 400);
+            } else {
+                if (contentLength >= MAX_BUFFER_SIZE_BYTES) {
+                    console.warn(`Request body size (${contentLength} bytes) exceeds limit. Retries disabled.`);
+                } else {
+                     console.warn(`Request body size is unknown or zero. Retries disabled.`);
+                }
             }
         }
         // --- End of Unified Caching ---
@@ -293,43 +285,6 @@ app.get('/', (c: Context) => c.text('LLM Gateway Service is running.'));
 app.get('/robots.txt', (c: Context) => c.text('User-agent: *\nDisallow: /'));
 
 // --- 通配符代理路由 ---
-
-// This route specifically handles the resumable upload PUT requests from Gemini.
-// It proxies the request to the actual Google Cloud Storage URL.
-app.put('/google-upload-proxy/*', async (c: Context): Promise<Response> => {
-    const GOOGLE_UPLOAD_HOST = 'https://upload.generativelanguage.googleapis.com';
-
-    try {
-        // The original path from Google is appended after '/google-upload-proxy'
-        // e.g. /google-upload-proxy/upload/v1beta/files/abc -> /upload/v1beta/files/abc
-        const googlePath = c.req.path.replace('/google-upload-proxy', '');
-
-        // Reconstruct the full Google URL
-        const targetUrl = new URL(googlePath, GOOGLE_UPLOAD_HOST);
-        
-        // Append original query parameters from the client request
-        const query = c.req.query();
-        Object.keys(query).forEach(key => targetUrl.searchParams.set(key, query[key]));
-
-        const res = await fetch(targetUrl.toString(), {
-            method: 'PUT',
-            headers: {
-                // Forward essential headers from the client
-                'Content-Type': c.req.header('Content-Type') || '',
-                'Content-Length': c.req.header('Content-Length') || '',
-                ...Object.fromEntries(
-                    [...c.req.raw.headers.entries()].filter(([key]) => key.toLowerCase().startsWith('x-goog-'))
-                ),
-            },
-            body: c.req.raw.body,
-        });
-
-        return res;
-    } catch (error) {
-        console.error(`Gemini upload proxy failed:`, error);
-        return c.text('Bad Gateway: Upstream upload request failed', 502);
-    }
-});
 app.all('/*', handleGenericProxy);
 
 // --- 全局错误处理 ---
