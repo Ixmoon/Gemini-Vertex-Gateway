@@ -26,7 +26,8 @@ import { GeminiNativeStrategy } from "./strategies.ts";
  * @param url 解析后的 URL 对象
  * @returns 返回一个包含请求类型、路径前缀和处理路径的对象。
  */
-const determineRequestType = (url: URL): { type: RequestType | "UNKNOWN", prefix: string | null, path: string } => {
+const determineRequestType = (c: Context): { type: RequestType | "UNKNOWN", prefix: string | null, path: string } => {
+    const url = new URL(c.req.url);
     const { pathname } = url;
 
     // 1. Vertex AI 的路径有特殊前缀
@@ -38,8 +39,12 @@ const determineRequestType = (url: URL): { type: RequestType | "UNKNOWN", prefix
     if (pathname.startsWith('/gemini/')) {
         const prefix = '/gemini';
         const path = pathname.slice(prefix.length);
-        // 根据路径是否包含 /v1beta/ 来区分是 OpenAI 兼容模式还是原生模式
-        return { type: path.startsWith('/v1beta/') ? "GEMINI_NATIVE" : "GEMINI_OPENAI", prefix, path };
+        
+        // 根据是否存在 Authorization: Bearer Header 来区分 OpenAI 兼容模式和原生模式
+        // 原生 API 使用 x-goog-api-key 或 ?key=
+        // OpenAI 兼容 API 使用 Authorization: Bearer
+        const isGeminiOpenAI = !!c.req.header("Authorization")?.includes('Bearer');
+        return { type: isGeminiOpenAI ? "GEMINI_OPENAI" : "GEMINI_NATIVE", prefix, path };
     }
 
     // 3. 检查通用 API 映射
@@ -65,7 +70,7 @@ const handleWebSocketProxy = async (c: Context): Promise<Response> => {
     }
 
     const url = new URL(c.req.url);
-    const { type, ...details } = determineRequestType(url);
+    const { type, ...details } = determineRequestType(c);
 
     if (type !== "GEMINI_NATIVE") {
         return c.text(`WebSocket proxy is only supported for GEMINI_NATIVE, but got ${type}`, 400);
@@ -145,7 +150,7 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
     }
     const originalReq = c.req.raw;
     const url = new URL(originalReq.url); // --- 只解析一次 URL ---
-    const { type, ...details } = determineRequestType(url);
+    const { type, ...details } = determineRequestType(c);
 
     if (type === "UNKNOWN") {
         return c.json({ error: `No route for path: ${url.pathname}` }, 404);
