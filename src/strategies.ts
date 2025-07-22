@@ -208,36 +208,28 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
             res.headers.has('x-goog-upload-url');
 
         if (isUploadInit) {
-            // The res.arrayBuffer() call hangs on chunked+gzipped responses.
-            // Using res.json() works around this, as its internal stream handling
-            // seems to correctly process the end of the stream.
-            const bodyJson = await res.json();
-            const bodyForNewResponse = JSON.stringify(bodyJson);
-
-            console.log("--- GEMINI UPLOAD RESPONSE RECEIVED ---");
-            console.log("Status:", res.status);
-            console.log("Headers:", Object.fromEntries(res.headers.entries()));
-            console.log("Body JSON:", bodyJson);
-            console.log("------------------------------------");
+            // Any attempt to read the body with res.arrayBuffer() or res.json() hangs
+            // due to a suspected bug in Deno's handling of chunked+gzipped streams.
+            // The solution is to use a streaming pass-through. We create a new response,
+            // but pass the original res.body stream directly without reading it.
+            // This allows us to modify the headers while letting the engine handle
+            // streaming the body directly to the client.
             
             const newHeaders = new Headers(res.headers);
             const originalUploadUrlStr = newHeaders.get('x-goog-upload-url');
 
             if (originalUploadUrlStr) {
                 const googleUploadUrl = new URL(originalUploadUrlStr);
-
-                // This creates a relative URL like:
-                // /google-upload-proxy/upload/v1beta/files/abc?upload_id=123
                 const proxyUploadUrl = `/google-upload-proxy${googleUploadUrl.pathname}${googleUploadUrl.search}`;
                 newHeaders.set('x-goog-upload-url', proxyUploadUrl);
 
-                // Since we've parsed and stringified the body, we must remove
-                // the original encoding and length headers and set the new correct length.
+                // We are not reading the body, so we cannot know its length.
+                // We MUST remove content-length and content-encoding to let the framework
+                // correctly handle the streaming via transfer-encoding: chunked.
                 newHeaders.delete('content-encoding');
                 newHeaders.delete('content-length');
-                newHeaders.set('content-length', String(new TextEncoder().encode(bodyForNewResponse).byteLength));
 
-                return new Response(bodyForNewResponse, {
+                return new Response(res.body, {
                     status: res.status,
                     statusText: res.statusText,
                     headers: newHeaders,
