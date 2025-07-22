@@ -171,27 +171,27 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
         let parsedBody: Record<string, any> | null = null;
         let retriesEnabled = false;
 
-        if (originalReq.body) {
-            const contentLength = parseInt(originalReq.headers.get('content-length') || '0', 10);
-            if (contentLength > 0 && contentLength < MAX_BUFFER_SIZE_BYTES) {
-                try {
-                    bodyBuffer = await originalReq.arrayBuffer();
+        if (originalReq.body && !originalReq.bodyUsed) {
+            try {
+                bodyBuffer = await originalReq.arrayBuffer();
+
+                if (bodyBuffer.byteLength >= MAX_BUFFER_SIZE_BYTES) {
+                    console.warn(`Request body size (${bodyBuffer.byteLength} bytes) exceeds buffer limit. Retries disabled.`);
+                    retriesEnabled = false;
+                } else if (bodyBuffer.byteLength > 0) {
                     retriesEnabled = true;
                     if (originalReq.headers.get('content-type')?.includes('application/json')) {
                         // 使用 TextDecoder 将 ArrayBuffer 转换为字符串
                         const bodyText = new TextDecoder().decode(bodyBuffer);
                         parsedBody = JSON.parse(bodyText);
                     }
-                } catch (e) {
-                    console.error("Error buffering or parsing request body:", e);
-                    return c.json({ error: "Invalid request body provided." }, 400);
-                }
-            } else {
-                if (contentLength >= MAX_BUFFER_SIZE_BYTES) {
-                    console.warn(`Request body size (${contentLength} bytes) exceeds limit. Retries disabled.`);
                 } else {
-                     console.warn(`Request body size is unknown or zero. Retries disabled.`);
+                    // Body is present but empty, disable retries.
+                    retriesEnabled = false;
                 }
+            } catch (e) {
+                console.error("Error buffering or parsing request body:", e);
+                return c.json({ error: "Invalid request body provided." }, 400);
             }
         }
         // --- End of Unified Caching ---
