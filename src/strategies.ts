@@ -16,6 +16,7 @@ import type { AuthenticationDetails, RequestHandlerStrategy, StrategyContext } f
 import { getApiKeyFromReq, buildBaseProxyHeaders, _getGeminiAuthDetails } from "./auth.ts";
 
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
+const GEMINI_UPLOAD_URL = "https://generativelanguage.googleapis.com/upload";
 
 // =================================================================================
 // --- 1. Vertex AI 策略 ---
@@ -99,7 +100,7 @@ export class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 
     getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
         const model = ctx.parsedBody?.model ?? null;
-        return Promise.resolve(_getGeminiAuthDetails(c, model, attempt, "Gemini OpenAI"));
+        return Promise.resolve(_getGeminiAuthDetails(c, ctx, model, attempt, "Gemini OpenAI"));
     }
     buildTargetUrl(ctx: StrategyContext): URL {
         // 从原始路径中移除可选的 /v1 前缀，以获得标准的 OpenAI 路径
@@ -156,16 +157,46 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
     getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
         // For native requests, the model is in the URL path, not the body.
         const model = ctx.path.match(/\/models\/([^:]+):/)?.[1] ?? null;
-        return Promise.resolve(_getGeminiAuthDetails(c, model, attempt, "Gemini Native"));
+        return Promise.resolve(_getGeminiAuthDetails(c, ctx, model, attempt, "Gemini Native"));
     }
     buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
-        if (!auth.key) throw new Response("Gemini Native requires an API Key.", { status: 500 });
-        const url = new URL(ctx.path, GEMINI_BASE_URL);
-        ctx.originalUrl.searchParams.forEach((v, k) => k.toLowerCase() !== 'key' && url.searchParams.set(k, v));
-        url.searchParams.set('key', auth.key);
+        // 文件上传请求 (POST a file) 使用一个特殊的 upload URL.
+        const isUpload = ctx.originalRequest.method === 'POST' && ctx.path.startsWith('/v1beta/files');
+
+        const baseUrl = isUpload ? GEMINI_UPLOAD_URL : GEMINI_BASE_URL;
+        const url = new URL(ctx.path, baseUrl);
+
+        // 将原始请求中的所有查询参数（除了 'key'）复制到目标 URL 中
+        ctx.originalUrl.searchParams.forEach((v, k) => {
+            if (k.toLowerCase() !== 'key') {
+                url.searchParams.set(k, v);
+            }
+        });
+
         return url;
     }
-    buildRequestHeaders(ctx: StrategyContext, _auth: AuthenticationDetails) { const h = buildBaseProxyHeaders(ctx.originalRequest.headers); h.delete('authorization'); h.delete('x-goog-api-key'); return h; }
+    buildRequestHeaders(ctx: StrategyContext, auth: AuthenticationDetails) {
+        const h = buildBaseProxyHeaders(ctx.originalRequest.headers);
+        h.delete('authorization'); h.delete('x-goog-api-key');
+        if (auth.key) {
+            h.set('x-goog-api-key', auth.key);
+        }
+        return h;
+    }
+    public buildWebSocketTarget(ctx: StrategyContext): URL {
+        const url = new URL(GEMINI_BASE_URL);
+        url.protocol = 'wss:';
+        url.pathname = ctx.path;
+    
+        // 复制所有查询参数，除了用于用户认证的 'key'
+        ctx.originalUrl.searchParams.forEach((v, k) => {
+            if (k.toLowerCase() !== 'key') {
+                url.searchParams.set(k, v);
+            }
+        });
+    
+        return url;
+    }
     // No transformation needed for the request body
 }
 

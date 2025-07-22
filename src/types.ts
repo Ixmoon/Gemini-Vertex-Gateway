@@ -49,6 +49,7 @@ export interface StrategyContext {
     prefix: string | null;
     /** 如果请求体被缓存，这里是解析后的 JSON 对象 */
     parsedBody: Record<string, any> | null;
+    isWebSocket?: boolean;
 }
 
 // =================================================================================

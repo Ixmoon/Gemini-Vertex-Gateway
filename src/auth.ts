@@ -6,7 +6,7 @@
 
 import type { Context } from "hono";
 import { configManager, poolKeySelector } from "./managers.ts";
-import type { ApiKeyResult, AuthenticationDetails } from "./types.ts";
+import type { ApiKeyResult, AuthenticationDetails, StrategyContext } from "./types.ts";
 
 /**
  * 从请求中提取 API 密钥。
@@ -25,6 +25,27 @@ export const getApiKeyFromReq = (c: Context, url: URL): string | null => {
  * @param h 原始请求的 Headers 对象
  * @returns 新的 Headers 对象
  */
+/**
+ * 根据我们最终确定的清单，判断一个请求是否为有状态的。
+ * @param ctx 策略上下文对象
+ * @returns 如果请求被视为有状态，则返回 true，否则返回 false。
+ */
+export const isStatefulRequest = (ctx: StrategyContext): boolean => {
+    // 检查 WebSocket
+    if (ctx.isWebSocket) return true;
+
+    // 检查有状态的路径前缀
+    const statefulPaths = ['/v1beta/files', '/v1beta/tunedModels', '/v1beta/operations', '/v1beta/corpora'];
+    if (statefulPaths.some(p => ctx.path.startsWith(p))) return true;
+
+    // 检查 generateContent 请求体中是否引用了 fileData
+    if (ctx.parsedBody?.contents?.some((c: any) => c.parts?.some((p: any) => 'fileData' in p))) {
+        return true;
+    }
+
+    return false;
+};
+
 export const buildBaseProxyHeaders = (h: Headers): Headers => {
     const n = new Headers(h);
     n.delete('host');
@@ -62,19 +83,29 @@ const getApiKeyForRequest = (userKey: string | null, model: string | null): ApiK
  * @param name 策略名称（用于日志）
  * @returns 返回认证详情对象
  */
-export const _getGeminiAuthDetails = (c: Context, model: string | null, attempt: number, name: string): AuthenticationDetails => {
-    const url = new URL(c.req.url); // 这里仍然需要解析，但这是调用链路的深层，暂时接受
-    const userApiKey = getApiKeyFromReq(c, url);
+export const _getGeminiAuthDetails = (c: Context, ctx: StrategyContext, model: string | null, attempt: number, name: string): AuthenticationDetails => {
     const config = configManager.getSync();
-    const isModels = url.pathname.endsWith('/models');
+    
+    // 1. 检查是否为有状态请求
+    if (isStatefulRequest(ctx)) {
+        if (config.fallbackKey) {
+            // 对于有状态请求，强制使用备用密钥，不进行重试。
+            return { key: config.fallbackKey, source: 'fallback', gcpToken: null, gcpProject: null, maxRetries: 1 };
+        } else {
+            // 如果没有配置备用密钥，则无法处理有状态请求。
+            throw new Response(`Stateful request (${name}) cannot be processed: No fallbackKey configured.`, { status: 503 });
+        }
+    }
+
+    // 2. 对于无状态请求，执行现有的轮询和重试逻辑
+    const userApiKey = getApiKeyFromReq(c, ctx.originalUrl);
+    const isModels = ctx.path.endsWith('/models');
     let result: ApiKeyResult | null = null;
 
     if (attempt === 1) {
-        // 首次尝试
         result = getApiKeyForRequest(userApiKey, model);
         if (!result && !isModels) throw new Response(`No valid API key (${name})`, { status: 401 });
     } else if (userApiKey && config.triggerKeys.has(userApiKey)) {
-        // 重试时，如果用户是触发密钥，则尝试从池中获取下一个密钥
         const poolKey = poolKeySelector.next();
         if (poolKey) {
             result = { key: poolKey, source: 'pool' };
@@ -82,7 +113,6 @@ export const _getGeminiAuthDetails = (c: Context, model: string | null, attempt:
             throw new Response(`Key pool exhausted (${name})`, { status: 503 });
         }
     } else if (attempt > 1 && !isModels) {
-        // 如果是普通用户的密钥，则不进行重试
         throw new Response(`Request failed, non-trigger key won't be retried (${name})`, { status: 503 });
     }
 

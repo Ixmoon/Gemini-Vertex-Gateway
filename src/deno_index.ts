@@ -15,6 +15,7 @@
 import { Hono, Context } from "hono";
 import { configManager, strategyManager } from "./managers.ts";
 import type { RequestType, StrategyContext } from "./types.ts";
+import { GeminiNativeStrategy } from "./strategies.ts";
 
 // =================================================================================
 // --- 1. 策略选择器与主处理函数 ---
@@ -54,12 +55,94 @@ const determineRequestType = (url: URL): { type: RequestType | "UNKNOWN", prefix
     return { type: "GENERIC_PROXY", prefix, path };
 };
 
+/**
+ * 处理 WebSocket 升级请求并建立双向代理。
+ */
+const handleWebSocketProxy = async (c: Context): Promise<Response> => {
+    const upgradeHeader = c.req.header('Upgrade');
+    if (upgradeHeader?.toLowerCase() !== 'websocket') {
+        return c.text('Expected Upgrade: websocket', 426);
+    }
+
+    const url = new URL(c.req.url);
+    const { type, ...details } = determineRequestType(url);
+
+    if (type !== "GEMINI_NATIVE") {
+        return c.text(`WebSocket proxy is only supported for GEMINI_NATIVE, but got ${type}`, 400);
+    }
+
+    try {
+        const strategy = await strategyManager.get(type) as GeminiNativeStrategy;
+        const context: StrategyContext = {
+            originalUrl: url,
+            originalRequest: c.req.raw,
+            parsedBody: null,
+            isWebSocket: true,
+            ...details
+        };
+
+        const auth = await strategy.getAuthenticationDetails(c, context, 1);
+        if (!auth.key) {
+            return c.text("Authentication failed for WebSocket proxy.", 401);
+        }
+        
+        const targetUrl = strategy.buildWebSocketTarget(context);
+        targetUrl.searchParams.set('key', auth.key);
+
+        const { response, socket: clientSocket } = Deno.upgradeWebSocket(c.req.raw);
+
+        // Deno 的 WebSocket 构造函数不支持自定义头部。
+        // API 密钥通过 URL 查询参数 `key` 传递。
+        const googleSocket = new WebSocket(targetUrl);
+
+        clientSocket.onopen = () => console.log("Client WebSocket connected.");
+        googleSocket.onopen = () => console.log("Backend WebSocket connected.");
+
+        clientSocket.onmessage = (event) => {
+            if (googleSocket.readyState === WebSocket.OPEN) {
+                googleSocket.send(event.data);
+            }
+        };
+        googleSocket.onmessage = (event) => {
+            if (clientSocket.readyState === WebSocket.OPEN) {
+                clientSocket.send(event.data);
+            }
+        };
+
+        const closeHandler = (event: CloseEvent) => {
+            console.log(`WebSocket closed: ${event.code} ${event.reason}`);
+            if (clientSocket.readyState !== WebSocket.CLOSED) clientSocket.close(event.code, event.reason);
+            if (googleSocket.readyState !== WebSocket.CLOSED) googleSocket.close(event.code, event.reason);
+        };
+        const errorHandler = (event: Event) => {
+            console.error("WebSocket error:", event);
+            const reason = event instanceof ErrorEvent ? event.message : "Unknown error";
+            if (clientSocket.readyState < WebSocket.CLOSING) clientSocket.close(1011, reason);
+            if (googleSocket.readyState < WebSocket.CLOSING) googleSocket.close(1011, reason);
+        };
+
+        clientSocket.onclose = closeHandler;
+        googleSocket.onclose = closeHandler;
+        clientSocket.onerror = errorHandler;
+        googleSocket.onerror = errorHandler;
+
+        return response;
+
+    } catch (error) {
+        console.error(`Critical error in handleWebSocketProxy:`, error);
+        return c.text(`Internal Server Error: ${error instanceof Error ? error.message : "Unknown"}`, 500);
+    }
+};
+
 
 /**
  * 通用代理处理函数。
  * 这是所有代理请求的入口点。
  */
 const handleGenericProxy = async (c: Context): Promise<Response> => {
+    if (c.req.header('Upgrade')?.toLowerCase() === 'websocket') {
+        return handleWebSocketProxy(c);
+    }
     const originalReq = c.req.raw;
     const url = new URL(originalReq.url); // --- 只解析一次 URL ---
     const { type, ...details } = determineRequestType(url);
@@ -117,6 +200,7 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
                     originalUrl: url, // --- 复用已解析的 URL 对象 ---
                     originalRequest: originalReq,
                     parsedBody: parsedBody,
+                    isWebSocket: false,
                     ...details
                 };
 
