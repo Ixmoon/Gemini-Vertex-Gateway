@@ -183,13 +183,6 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
         if (auth.key) {
             h.set('x-goog-api-key', auth.key);
         }
-        // Manually copy all x-goog-* headers for file uploads, which are not
-        // included by default in the fetch standard for requests.
-        for (const [key, value] of ctx.originalRequest.headers.entries()) {
-            if (key.toLowerCase().startsWith('x-goog-')) {
-                h.set(key, value);
-            }
-        }
         return h;
     }
     public buildWebSocketTarget(ctx: StrategyContext): URL {
