@@ -161,7 +161,7 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
     }
     buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
         // 文件上传请求 (POST a file) 使用一个特殊的 upload URL.
-        const isUpload = ctx.originalRequest.method === 'POST' && ctx.path.startsWith('/v1beta/files');
+        const isUpload = ctx.originalRequest.method === 'POST' && ctx.path.includes('/files');
 
         const baseUrl = isUpload ? GEMINI_UPLOAD_URL : GEMINI_BASE_URL;
         const url = new URL(ctx.path, baseUrl);
