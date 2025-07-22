@@ -160,13 +160,21 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
         return Promise.resolve(_getGeminiAuthDetails(c, ctx, model, attempt, "Gemini Native"));
     }
     buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
-        // 文件上传请求 (POST a file) 使用一个特殊的 upload URL.
-        const isUpload = ctx.originalRequest.method === 'POST' && ctx.path.includes('/files');
+        // Resumable Upload PUT requests are sent to a path like /gemini/upload/v1beta/files...
+        // The ctx.path will be /upload/v1beta/files...
+        if (ctx.originalRequest.method === 'PUT' && ctx.path.startsWith('/upload/')) {
+            const targetUrl = new URL(GEMINI_UPLOAD_URL); // e.g. https://generativelanguage.googleapis.com/upload
+            targetUrl.pathname = ctx.path; // e.g. /upload/v1beta/files
+            targetUrl.search = ctx.originalUrl.search; // all original query params
+            return targetUrl;
+        }
 
+        // For other requests, including the initial POST to create an upload session
+        const isUpload = ctx.originalRequest.method === 'POST' && ctx.path.includes('/files');
         const baseUrl = isUpload ? GEMINI_UPLOAD_URL : GEMINI_BASE_URL;
         const url = new URL(ctx.path, baseUrl);
 
-        // 将原始请求中的所有查询参数（除了 'key'）复制到目标 URL 中
+        // Copy search params from original request, excluding auth key
         ctx.originalUrl.searchParams.forEach((v, k) => {
             if (k.toLowerCase() !== 'key') {
                 url.searchParams.set(k, v);
@@ -179,7 +187,11 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
         const h = buildBaseProxyHeaders(ctx.originalRequest.headers);
         h.delete('authorization'); h.delete('x-goog-api-key');
         if (auth.key) {
-            h.set('x-goog-api-key', auth.key);
+            // The API key is not needed for the subsequent PUT requests in a resumable upload.
+            // The upload URL itself is the authentication mechanism.
+            if (!(ctx.originalRequest.method === 'PUT' && ctx.path.startsWith('/upload/'))) {
+                h.set('x-goog-api-key', auth.key);
+            }
         }
         return h;
     }
@@ -196,6 +208,36 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
         });
     
         return url;
+    }
+
+    async handleResponse(res: Response, ctx: StrategyContext): Promise<Response> {
+        const uploadUrlHeader = res.headers.get('x-goog-upload-url');
+
+        if (uploadUrlHeader) {
+            try {
+                const googleUploadUrl = new URL(uploadUrlHeader);
+                const proxyUrl = new URL(ctx.originalUrl);
+
+                proxyUrl.pathname = `${ctx.prefix}${googleUploadUrl.pathname}`;
+                proxyUrl.search = googleUploadUrl.search;
+
+                const newHeaders = new Headers(res.headers);
+                newHeaders.set('x-goog-upload-url', proxyUrl.toString());
+                newHeaders.delete('content-encoding');
+                newHeaders.delete('content-length');
+
+                return new Response(res.body, {
+                    status: res.status,
+                    statusText: res.statusText,
+                    headers: newHeaders
+                });
+            } catch (e) {
+                console.error("Failed to rewrite x-goog-upload-url:", e);
+                return res;
+            }
+        }
+
+        return res;
     }
     // No transformation needed for the request body
 }
