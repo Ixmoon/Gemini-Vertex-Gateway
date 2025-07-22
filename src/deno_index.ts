@@ -165,36 +165,43 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
     try {
         const strategy = await strategyManager.get(type);
 
-        // --- Unified Body Caching & Parsing ---
+        // --- Conditional Body Caching & Parsing ---
         const MAX_BUFFER_SIZE_BYTES = 100 * 1024 * 1024; // 100MB
         let bodyBuffer: ArrayBuffer | null = null;
         let parsedBody: Record<string, any> | null = null;
         let retriesEnabled = false;
 
-        if (originalReq.body && !originalReq.bodyUsed) {
-            try {
-                bodyBuffer = await originalReq.arrayBuffer();
+        // Only buffer JSON requests to support retries and transformations.
+        // Stream other content types to support large file uploads.
+        const contentType = originalReq.headers.get('content-type');
+        const isJsonRequest = contentType?.includes('application/json');
 
-                if (bodyBuffer.byteLength >= MAX_BUFFER_SIZE_BYTES) {
-                    console.warn(`Request body size (${bodyBuffer.byteLength} bytes) exceeds buffer limit. Retries disabled.`);
-                    retriesEnabled = false;
-                } else if (bodyBuffer.byteLength > 0) {
-                    retriesEnabled = true;
-                    if (originalReq.headers.get('content-type')?.includes('application/json')) {
-                        // 使用 TextDecoder 将 ArrayBuffer 转换为字符串
+        if (originalReq.body && !originalReq.bodyUsed) {
+            if (isJsonRequest) {
+                try {
+                    bodyBuffer = await originalReq.arrayBuffer();
+
+                    if (bodyBuffer.byteLength >= MAX_BUFFER_SIZE_BYTES) {
+                        console.warn(`Request body size (${bodyBuffer.byteLength} bytes) exceeds buffer limit. Retries disabled.`);
+                        retriesEnabled = false;
+                    } else if (bodyBuffer.byteLength > 0) {
+                        retriesEnabled = true;
                         const bodyText = new TextDecoder().decode(bodyBuffer);
                         parsedBody = JSON.parse(bodyText);
+                    } else {
+                        retriesEnabled = false; // Body is present but empty.
                     }
-                } else {
-                    // Body is present but empty, disable retries.
-                    retriesEnabled = false;
+                } catch (e) {
+                    console.error("Error buffering or parsing JSON request body:", e);
+                    return c.json({ error: "Invalid JSON request body provided." }, 400);
                 }
-            } catch (e) {
-                console.error("Error buffering or parsing request body:", e);
-                return c.json({ error: "Invalid request body provided." }, 400);
+            } else {
+                // For non-JSON content (e.g., file uploads), we stream the body.
+                // Retries are disabled because we cannot re-consume the stream.
+                retriesEnabled = false;
             }
         }
-        // --- End of Unified Caching ---
+        // --- End of Conditional Caching ---
 
         let attempts = 0, maxRetries = 1, lastError: Response | null = null;
 
@@ -223,8 +230,15 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
                 }
 
                 // --- Body Transformation ---
-                const transformedBody = strategy.transformRequestBody ? strategy.transformRequestBody(context.parsedBody, context) : context.parsedBody;
-                const finalBody = transformedBody ? JSON.stringify(transformedBody) : (bodyBuffer ?? null);
+                const transformedBody = (retriesEnabled && strategy.transformRequestBody)
+                    ? strategy.transformRequestBody(context.parsedBody, context)
+                    : context.parsedBody;
+
+                // For JSON, use the transformed (or original) stringified body.
+                // For streaming, use the original request's body stream directly.
+                const finalBody = retriesEnabled
+                    ? (transformedBody ? JSON.stringify(transformedBody) : bodyBuffer)
+                    : originalReq.body;
                 // --- End Body Transformation ---
 
                 const [targetUrl, targetHeaders] = await Promise.all([
