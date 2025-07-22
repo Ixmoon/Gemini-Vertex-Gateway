@@ -208,13 +208,15 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
             res.headers.has('x-goog-upload-url');
 
         if (isUploadInit) {
+            // We must buffer the body to ensure it's fully read and decompressed
+            // before creating a new response. This prevents the stream from being
+            // lost when we simply replace the headers.
+            const bodyBuffer = await res.arrayBuffer();
+            
             const newHeaders = new Headers(res.headers);
             const originalUploadUrlStr = newHeaders.get('x-goog-upload-url');
 
             if (originalUploadUrlStr) {
-                // The original URL from Google is a full URL. We need to proxy the subsequent
-                // PUT request back through our gateway. To do this, we rewrite the URL
-                // to be a path on our server, pointing to the dedicated upload proxy endpoint.
                 const googleUploadUrl = new URL(originalUploadUrlStr);
 
                 // This creates a relative URL like:
@@ -222,7 +224,13 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
                 const proxyUploadUrl = `/google-upload-proxy${googleUploadUrl.pathname}${googleUploadUrl.search}`;
                 newHeaders.set('x-goog-upload-url', proxyUploadUrl);
 
-                return new Response(res.body, {
+                // Since we've buffered and decompressed the body, we must remove
+                // the original encoding and length headers and set the new correct length.
+                newHeaders.delete('content-encoding');
+                newHeaders.delete('content-length');
+                newHeaders.set('content-length', String(bodyBuffer.byteLength));
+
+                return new Response(bodyBuffer, {
                     status: res.status,
                     statusText: res.statusText,
                     headers: newHeaders,
