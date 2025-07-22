@@ -208,17 +208,16 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
             res.headers.has('x-goog-upload-url');
 
         if (isUploadInit) {
-            // We must buffer the body to ensure it's fully read and decompressed
-            // before creating a new response. This prevents the stream from being
-            // lost when we simply replace the headers.
-            const bodyBuffer = await res.arrayBuffer();
+            // The res.arrayBuffer() call hangs on chunked+gzipped responses.
+            // Using res.json() works around this, as its internal stream handling
+            // seems to correctly process the end of the stream.
+            const bodyJson = await res.json();
+            const bodyForNewResponse = JSON.stringify(bodyJson);
 
-            // Log the details for debugging, as requested.
-            const bodyTextForLogging = new TextDecoder().decode(bodyBuffer);
             console.log("--- GEMINI UPLOAD RESPONSE RECEIVED ---");
             console.log("Status:", res.status);
             console.log("Headers:", Object.fromEntries(res.headers.entries()));
-            console.log("Body Text:", bodyTextForLogging);
+            console.log("Body JSON:", bodyJson);
             console.log("------------------------------------");
             
             const newHeaders = new Headers(res.headers);
@@ -232,13 +231,13 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
                 const proxyUploadUrl = `/google-upload-proxy${googleUploadUrl.pathname}${googleUploadUrl.search}`;
                 newHeaders.set('x-goog-upload-url', proxyUploadUrl);
 
-                // Since we've buffered and decompressed the body, we must remove
+                // Since we've parsed and stringified the body, we must remove
                 // the original encoding and length headers and set the new correct length.
                 newHeaders.delete('content-encoding');
                 newHeaders.delete('content-length');
-                newHeaders.set('content-length', String(bodyBuffer.byteLength));
+                newHeaders.set('content-length', String(new TextEncoder().encode(bodyForNewResponse).byteLength));
 
-                return new Response(bodyBuffer, {
+                return new Response(bodyForNewResponse, {
                     status: res.status,
                     statusText: res.statusText,
                     headers: newHeaders,
