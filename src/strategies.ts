@@ -212,6 +212,14 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
             // before creating a new response. This prevents the stream from being
             // lost when we simply replace the headers.
             const bodyBuffer = await res.arrayBuffer();
+
+            // Log the details for debugging, as requested.
+            const bodyTextForLogging = new TextDecoder().decode(bodyBuffer);
+            console.log("--- GEMINI UPLOAD RESPONSE RECEIVED ---");
+            console.log("Status:", res.status);
+            console.log("Headers:", Object.fromEntries(res.headers.entries()));
+            console.log("Body Text:", bodyTextForLogging);
+            console.log("------------------------------------");
             
             const newHeaders = new Headers(res.headers);
             const originalUploadUrlStr = newHeaders.get('x-goog-upload-url');
