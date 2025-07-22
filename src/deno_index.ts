@@ -286,28 +286,40 @@ app.get('/robots.txt', (c: Context) => c.text('User-agent: *\nDisallow: /'));
 
 // --- 通配符代理路由 ---
 
-app.put('/google-upload-proxy', async (c: Context): Promise<Response> => {
-    const target = c.req.query('target');
-    if (!target) {
-        return c.text('Missing "target" query parameter', 400);
-    }
+// This route specifically handles the resumable upload PUT requests from Gemini.
+// It proxies the request to the actual Google Cloud Storage URL.
+app.put('/google-upload-proxy/*', async (c: Context): Promise<Response> => {
+    const GOOGLE_UPLOAD_HOST = 'https://upload.generativelanguage.googleapis.com';
 
     try {
-        const decodedTarget = decodeURIComponent(target);
+        // The original path from Google is appended after '/google-upload-proxy'
+        // e.g. /google-upload-proxy/upload/v1beta/files/abc -> /upload/v1beta/files/abc
+        const googlePath = c.req.path.replace('/google-upload-proxy', '');
 
-        const res = await fetch(decodedTarget, {
+        // Reconstruct the full Google URL
+        const targetUrl = new URL(googlePath, GOOGLE_UPLOAD_HOST);
+        
+        // Append original query parameters from the client request
+        const query = c.req.query();
+        Object.keys(query).forEach(key => targetUrl.searchParams.set(key, query[key]));
+
+        const res = await fetch(targetUrl.toString(), {
             method: 'PUT',
             headers: {
+                // Forward essential headers from the client
                 'Content-Type': c.req.header('Content-Type') || '',
                 'Content-Length': c.req.header('Content-Length') || '',
+                ...Object.fromEntries(
+                    [...c.req.raw.headers.entries()].filter(([key]) => key.toLowerCase().startsWith('x-goog-'))
+                ),
             },
             body: c.req.raw.body,
         });
 
         return res;
     } catch (error) {
-        console.error(`Gemini upload proxy failed for target "${target}":`, error);
-        return c.text('Bad Gateway: Upstream request failed', 502);
+        console.error(`Gemini upload proxy failed:`, error);
+        return c.text('Bad Gateway: Upstream upload request failed', 502);
     }
 });
 

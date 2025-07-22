@@ -183,6 +183,13 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
         if (auth.key) {
             h.set('x-goog-api-key', auth.key);
         }
+        // Manually copy all x-goog-* headers for file uploads, which are not
+        // included by default in the fetch standard for requests.
+        for (const [key, value] of ctx.originalRequest.headers.entries()) {
+            if (key.toLowerCase().startsWith('x-goog-')) {
+                h.set(key, value);
+            }
+        }
         return h;
     }
     public buildWebSocketTarget(ctx: StrategyContext): URL {
@@ -209,11 +216,17 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
 
         if (isUploadInit) {
             const newHeaders = new Headers(res.headers);
-            const originalUploadUrl = newHeaders.get('x-goog-upload-url');
+            const originalUploadUrlStr = newHeaders.get('x-goog-upload-url');
 
-            if (originalUploadUrl) {
-                const encodedUrl = encodeURIComponent(originalUploadUrl);
-                const proxyUploadUrl = `/google-upload-proxy?target=${encodedUrl}`;
+            if (originalUploadUrlStr) {
+                // The original URL from Google is a full URL. We need to proxy the subsequent
+                // PUT request back through our gateway. To do this, we rewrite the URL
+                // to be a path on our server, pointing to the dedicated upload proxy endpoint.
+                const googleUploadUrl = new URL(originalUploadUrlStr);
+
+                // This creates a relative URL like:
+                // /google-upload-proxy/upload/v1beta/files/abc?upload_id=123
+                const proxyUploadUrl = `/google-upload-proxy${googleUploadUrl.pathname}${googleUploadUrl.search}`;
                 newHeaders.set('x-goog-upload-url', proxyUploadUrl);
 
                 return new Response(res.body, {
