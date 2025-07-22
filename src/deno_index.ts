@@ -239,11 +239,7 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
                     signal: originalReq.signal,
                 });
 
-                // For resumable uploads, a 308 response is expected and should not be treated as a retryable error.
-                const isUploadChunk = originalReq.method === 'PUT' && context.path.startsWith('/upload/');
-                const isSuccessfulUploadResponse = isUploadChunk && res.status === 308;
-
-                if (!res.ok && !isSuccessfulUploadResponse) {
+                if (!res.ok) {
                     const errorBodyText = await res.text();
                     console.error(`Upstream request to ${targetUrl.hostname} FAILED. Status: ${res.status}. Body: ${errorBodyText}`);
                     lastError = new Response(errorBodyText, { status: res.status, statusText: res.statusText, headers: res.headers });
