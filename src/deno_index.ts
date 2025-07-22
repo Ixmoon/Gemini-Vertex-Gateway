@@ -252,7 +252,39 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
                 }
                 
                 const finalContext: StrategyContext = { ...context, parsedBody: transformedBody };
-                return strategy.handleResponse ? await strategy.handleResponse(res, finalContext) : res;
+                const strategyResponse = strategy.handleResponse ? await strategy.handleResponse(res, finalContext) : res;
+
+                // --- Final Interception for Special Cases ---
+                // This is a workaround for a suspected Deno/Hono bug where reading a gzipped+chunked
+                // response body hangs, but passing the stream through loses the body.
+                // We intercept the response here, at a higher level, and try to read/rebuild it.
+                if (strategyResponse.headers.get('x-proxy-special-case') === 'gemini-upload-init') {
+                    try {
+                        console.log("[FINAL INTERCEPTION] Intercepting special Gemini upload response...");
+                        const bodyJson = await strategyResponse.json();
+                        console.log("[FINAL INTERCEPTION] Successfully parsed body:", bodyJson);
+                        
+                        const newHeaders = new Headers(strategyResponse.headers);
+                        newHeaders.delete('x-proxy-special-case');
+                        newHeaders.delete('content-encoding');
+                        newHeaders.delete('content-length');
+                        
+                        const newBody = JSON.stringify(bodyJson);
+                        newHeaders.set('content-length', String(new TextEncoder().encode(newBody).byteLength));
+
+                        return new Response(newBody, {
+                            status: strategyResponse.status,
+                            statusText: strategyResponse.statusText,
+                            headers: newHeaders
+                        });
+                    } catch (e) {
+                        console.error("[FINAL INTERCEPTION] Failed to parse and rebuild special response:", e);
+                        // Fallback to returning the (likely broken) response
+                        return strategyResponse;
+                    }
+                }
+                
+                return strategyResponse;
 
             } catch (error) {
                 if (error instanceof Response) {

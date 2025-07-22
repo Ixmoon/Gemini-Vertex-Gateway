@@ -208,13 +208,9 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
             res.headers.has('x-goog-upload-url');
 
         if (isUploadInit) {
-            // Any attempt to read the body with res.arrayBuffer() or res.json() hangs
-            // due to a suspected bug in Deno's handling of chunked+gzipped streams.
-            // The solution is to use a streaming pass-through. We create a new response,
-            // but pass the original res.body stream directly without reading it.
-            // This allows us to modify the headers while letting the engine handle
-            // streaming the body directly to the client.
-            
+            // This is a special case. We modify the header and add a custom marker
+            // header, but we pass the original body stream through. The actual body
+            // handling will be intercepted and managed in the main handleGenericProxy function.
             const newHeaders = new Headers(res.headers);
             const originalUploadUrlStr = newHeaders.get('x-goog-upload-url');
 
@@ -222,13 +218,10 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
                 const googleUploadUrl = new URL(originalUploadUrlStr);
                 const proxyUploadUrl = `/google-upload-proxy${googleUploadUrl.pathname}${googleUploadUrl.search}`;
                 newHeaders.set('x-goog-upload-url', proxyUploadUrl);
+                // Mark this response for special handling at a higher level.
+                newHeaders.set('x-proxy-special-case', 'gemini-upload-init');
 
-                // We are not reading the body, so we cannot know its length.
-                // We MUST remove content-length and content-encoding to let the framework
-                // correctly handle the streaming via transfer-encoding: chunked.
-                newHeaders.delete('content-encoding');
-                newHeaders.delete('content-length');
-
+                // Pass the original stream through. DO NOT read it here.
                 return new Response(res.body, {
                     status: res.status,
                     statusText: res.statusText,
