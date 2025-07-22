@@ -222,13 +222,11 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
                 const proxyUploadUrl = `/google-upload-proxy${googleUploadUrl.pathname}${googleUploadUrl.search}`;
                 newHeaders.set('x-goog-upload-url', proxyUploadUrl);
 
-                // It's crucial to clone the original response to preserve all its properties,
-                // including the body stream, status, and especially all headers, before
-                // modifying just the 'x-goog-upload-url' header.
-                const clonedRes = res.clone();
-                const newRes = new Response(clonedRes.body, clonedRes);
-                newRes.headers.set('x-goog-upload-url', proxyUploadUrl);
-                return newRes;
+                return new Response(res.body, {
+                    status: res.status,
+                    statusText: res.statusText,
+                    headers: newHeaders,
+                });
             }
         }
 
