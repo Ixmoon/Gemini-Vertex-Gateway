@@ -49,8 +49,16 @@ const determineRequestType = (c: Context): { type: RequestType | "UNKNOWN", pref
         const prefix = '/gemini';
         const path = pathname.slice(prefix.length);
         
-        const isGeminiOpenAI = !!c.req.header("Authorization")?.includes('Bearer');
-        return { type: isGeminiOpenAI ? "GEMINI_OPENAI" : "GEMINI_NATIVE", prefix, path };
+        // Use a more robust method to differentiate between Native and OpenAI-compatible calls.
+        // OpenAI-compatible requests specifically target paths like '/chat/completions'.
+        const isOpenAICompatPath = path.includes('/chat/completions') || path.includes('/embeddings');
+        
+        if (isOpenAICompatPath) {
+            return { type: "GEMINI_OPENAI", prefix, path };
+        }
+        
+        // All other /gemini/ paths are considered native.
+        return { type: "GEMINI_NATIVE", prefix, path };
     }
 
     // 3. 检查通用 API 映射
@@ -232,17 +240,12 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
                     Promise.resolve(strategy.buildRequestHeaders(context, auth))
                 ]);
 
-                console.log(`[PROXY REQUEST] --> ${originalReq.method} ${targetUrl.toString()}`);
-                console.log(`[PROXY REQUEST HEADERS] -->`, Object.fromEntries(targetHeaders.entries()));
-                
                 const res = await fetch(targetUrl, {
                     method: originalReq.method,
                     headers: targetHeaders,
                     body: finalBody,
                     signal: originalReq.signal,
                 });
-
-                console.log(`[PROXY RESPONSE] <-- ${res.status} ${res.statusText} From ${targetUrl.toString()}`);
 
                 if (!res.ok) {
                     const errorBodyText = await res.text();
@@ -252,39 +255,7 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
                 }
                 
                 const finalContext: StrategyContext = { ...context, parsedBody: transformedBody };
-                const strategyResponse = strategy.handleResponse ? await strategy.handleResponse(res, finalContext) : res;
-
-                // --- Final Interception for Special Cases ---
-                // This is a workaround for a suspected Deno/Hono bug where reading a gzipped+chunked
-                // response body hangs, but passing the stream through loses the body.
-                // We intercept the response here, at a higher level, and try to read/rebuild it.
-                if (strategyResponse.headers.get('x-proxy-special-case') === 'gemini-upload-init') {
-                    try {
-                        console.log("[FINAL INTERCEPTION] Intercepting special Gemini upload response...");
-                        const bodyJson = await strategyResponse.json();
-                        console.log("[FINAL INTERCEPTION] Successfully parsed body:", bodyJson);
-                        
-                        const newHeaders = new Headers(strategyResponse.headers);
-                        newHeaders.delete('x-proxy-special-case');
-                        newHeaders.delete('content-encoding');
-                        newHeaders.delete('content-length');
-                        
-                        const newBody = JSON.stringify(bodyJson);
-                        newHeaders.set('content-length', String(new TextEncoder().encode(newBody).byteLength));
-
-                        return new Response(newBody, {
-                            status: strategyResponse.status,
-                            statusText: strategyResponse.statusText,
-                            headers: newHeaders
-                        });
-                    } catch (e) {
-                        console.error("[FINAL INTERCEPTION] Failed to parse and rebuild special response:", e);
-                        // Fallback to returning the (likely broken) response
-                        return strategyResponse;
-                    }
-                }
-                
-                return strategyResponse;
+                return strategy.handleResponse ? await strategy.handleResponse(res, finalContext) : res;
 
             } catch (error) {
                 if (error instanceof Response) {

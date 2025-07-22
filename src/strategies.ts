@@ -109,8 +109,8 @@ export class GeminiOpenAIStrategy implements RequestHandlerStrategy {
             openAIPath = openAIPath.slice(3); // e.g., /v1/chat/completions -> /chat/completions
         }
 
-        // 构建符合 Gemini OpenAI 兼容层要求的正确路径
-        const geminiPath = `/v1beta/openai${openAIPath}`;
+        // 构建符合 Gemini API 的正确路径。移除了不正确的 "/openai" 部分。
+        const geminiPath = `/v1beta${openAIPath}`;
 
         const url = new URL(geminiPath, GEMINI_BASE_URL);
         ctx.originalUrl.searchParams.forEach((v, k) => k.toLowerCase() !== 'key' && url.searchParams.set(k, v));
@@ -208,24 +208,19 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
             res.headers.has('x-goog-upload-url');
 
         if (isUploadInit) {
-            // This is a special case. We modify the header and add a custom marker
-            // header, but we pass the original body stream through. The actual body
-            // handling will be intercepted and managed in the main handleGenericProxy function.
-            const newHeaders = new Headers(res.headers);
-            const originalUploadUrlStr = newHeaders.get('x-goog-upload-url');
-
-            if (originalUploadUrlStr) {
-                const googleUploadUrl = new URL(originalUploadUrlStr);
-                const proxyUploadUrl = `/google-upload-proxy${googleUploadUrl.pathname}${googleUploadUrl.search}`;
-                newHeaders.set('x-goog-upload-url', proxyUploadUrl);
-                // Mark this response for special handling at a higher level.
-                newHeaders.set('x-proxy-special-case', 'gemini-upload-init');
-
-                // Pass the original stream through. DO NOT read it here.
-                return new Response(res.body, {
-                    status: res.status,
-                    statusText: res.statusText,
-                    headers: newHeaders,
+            // WORKAROUND for Deno/Hono bug with streaming gzipped+chunked responses.
+            // Instead of proxying the response (which fails), we redirect the client
+            // directly to the raw Google upload URL.
+            const googleUploadUrl = res.headers.get('x-goog-upload-url');
+            if (googleUploadUrl) {
+                console.log(`[WORKAROUND] Redirecting client to raw upload URL: ${googleUploadUrl}`);
+                // Use a 307 Temporary Redirect to preserve the method (PUT/POST) for the next request.
+                return new Response(null, {
+                    status: 307,
+                    statusText: 'Temporary Redirect',
+                    headers: {
+                        'Location': googleUploadUrl,
+                    }
                 });
             }
         }
