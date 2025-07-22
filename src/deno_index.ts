@@ -322,7 +322,6 @@ app.put('/google-upload-proxy/*', async (c: Context): Promise<Response> => {
         return c.text('Bad Gateway: Upstream upload request failed', 502);
     }
 });
-
 app.all('/*', handleGenericProxy);
 
 // --- 全局错误处理 ---
