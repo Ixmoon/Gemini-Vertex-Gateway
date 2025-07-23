@@ -332,28 +332,23 @@ export class GeminiNativeStrategy extends BaseStrategy {
         return Promise.resolve(_getGeminiAuthDetails(c, ctx, model, attempt, "Gemini Native"));
     }
     override buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
-        // Resumable Upload PUT requests are sent to a path like /gemini/upload/v1beta/files...
-        // The ctx.path will be /upload/v1beta/files...
-        if (ctx.originalRequest.method === 'PUT' && ctx.path.startsWith('/upload/')) {
-            const targetUrl = new URL(GEMINI_UPLOAD_URL); // e.g. https://generativelanguage.googleapis.com/upload
-            targetUrl.pathname = ctx.path; // e.g. /upload/v1beta/files
-            targetUrl.search = ctx.originalUrl.search; // all original query params
-            return targetUrl;
-        }
-
-        // For other requests, including the initial POST to create an upload session
-        const isUpload = ctx.originalRequest.method === 'POST' && ctx.path.includes('/files');
-        const baseUrl = isUpload ? GEMINI_UPLOAD_URL : GEMINI_BASE_URL;
-        const url = new URL(ctx.path, baseUrl);
-
-        // Copy search params from original request, excluding auth key
+        const isPutUpload = ctx.originalRequest.method === 'PUT' && ctx.path.startsWith('/upload/');
+        const isPostUpload = ctx.originalRequest.method === 'POST' && ctx.path.includes('/files');
+        
+        const baseUrl = (isPutUpload || isPostUpload) ? GEMINI_UPLOAD_URL : GEMINI_BASE_URL;
+        
+        const finalUrl = new URL(ctx.path, baseUrl);
+        
+        // Copy all search params from the request URL that the proxy received.
         ctx.originalUrl.searchParams.forEach((v, k) => {
-            if (k.toLowerCase() !== 'key') {
-                url.searchParams.set(k, v);
-            }
+            finalUrl.searchParams.set(k, v);
         });
-
-        return url;
+        
+        // Now, explicitly remove the 'key' param, as it's for proxy auth only.
+        // The real auth key will be in the x-goog-api-key header.
+        finalUrl.searchParams.delete('key');
+        
+        return finalUrl;
     }
     override buildRequestHeaders(ctx: StrategyContext, auth: AuthenticationDetails) {
         const h = buildBaseProxyHeaders(ctx.originalRequest.headers);
