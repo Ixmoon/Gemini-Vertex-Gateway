@@ -14,8 +14,8 @@
 // - gcpAuthManager: 负责管理 GCP 服务账号的认证和令牌获取，支持多凭证轮询。
 // - strategyManager: 负责根据请求类型动态地创建和提供相应的处理策略实例。
 
-import { GoogleAuth } from "google-auth-library";
 import * as configData from "./config_data.ts";
+import type { GoogleAuth } from "google-auth-library";
 import type { GcpCredentials, RequestHandlerStrategy, RequestType } from "./types.ts";
 import { OptimizedRoundRobinSelector } from "./utils.ts";
 import { VertexAIStrategy, GeminiOpenAIStrategy, GeminiNativeStrategy, GenericProxyStrategy } from "./strategies.ts";
@@ -113,7 +113,12 @@ export interface GcpAuth {
     getAuth: () => Promise<{ token: string; projectId: string; } | null>;
 }
 
-const gcpAuthManager = new LazyManager<GcpAuth>(() => {
+const gcpAuthManager = new LazyManager<GcpAuth>(async () => {
+    // --- 动态导入 ---
+    // 将 google-auth-library 的加载推迟到第一次需要它的时候，
+    // 这极大地优化了非 GCP 请求的冷启动性能。
+    const { GoogleAuth } = await import("google-auth-library");
+    
     const config = configManager.getSync();
     const authInstanceCache = new Map<string, GoogleAuth>();
     const credentials = config.gcpCredentials;
