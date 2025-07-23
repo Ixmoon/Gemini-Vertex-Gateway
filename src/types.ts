@@ -82,7 +82,7 @@ export interface RequestHandlerStrategy {
     /** (可选) 转换已解析的请求体对象 */
     transformRequestBody?(body: Record<string, any> | null, ctx: StrategyContext): Record<string, any> | null;
     /** (可选) 在收到目标服务响应后，返回给客户端之前进行处理 */
-    handleResponse?(res: Response, ctx: StrategyContext, auth: AuthenticationDetails): Promise<Response>;
+    handleResponse?(res: Response, ctx: StrategyContext): Promise<Response>;
     /** (可选) 处理 WebSocket 升级请求并建立双向代理 */
     handleWebSocketProxy?(c: unknown, ctx: StrategyContext): Promise<Response>;
 }

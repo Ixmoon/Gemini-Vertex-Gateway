@@ -151,7 +151,7 @@ abstract class BaseStrategy implements RequestHandlerStrategy {
         return body;
     }
 
-    handleResponse?(res: Response, _ctx: StrategyContext, _auth: AuthenticationDetails): Promise<Response> {
+    handleResponse?(res: Response, _ctx: StrategyContext): Promise<Response> {
         return Promise.resolve(res);
     }
 
@@ -296,7 +296,7 @@ export class GeminiOpenAIStrategy extends BaseStrategy {
         return headers;
     }
 
-    override async handleResponse(res: Response, ctx: StrategyContext, _auth: AuthenticationDetails): Promise<Response> {
+    override async handleResponse(res: Response, ctx: StrategyContext): Promise<Response> {
         if (!ctx.path.endsWith('/models') || !res.headers.get("content-type")?.includes("json")) return res;
         try {
             const body = await res.json();
@@ -326,29 +326,47 @@ export class GeminiNativeStrategy extends BaseStrategy {
         super();
     }
 
+    override async prepareRequestBody(req: Request) {
+        const contentLength = parseInt(req.headers.get('content-length') || '0', 10);
+        if (contentLength > 0 && contentLength < MAX_BUFFER_SIZE_BYTES) {
+            return this._bufferStreamInBackground(req);
+        }
+        return {
+            bodyForFirstAttempt: req.body,
+            getCachedBodyForRetry: () => Promise.resolve(null),
+            parsedBodyPromise: Promise.resolve(null),
+            retriesEnabled: false,
+        };
+    }
+
     override getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
         // For native requests, the model is in the URL path, not the body.
         const model = ctx.path.match(/\/models\/([^:]+):/)?.[1] ?? null;
         return Promise.resolve(_getGeminiAuthDetails(c, ctx, model, attempt, "Gemini Native"));
     }
     override buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
-        const isPutUpload = ctx.originalRequest.method === 'PUT' && ctx.path.startsWith('/upload/');
-        const isPostUpload = ctx.originalRequest.method === 'POST' && ctx.path.includes('/files');
-        
-        const baseUrl = (isPutUpload || isPostUpload) ? GEMINI_UPLOAD_URL : GEMINI_BASE_URL;
-        
-        const finalUrl = new URL(ctx.path, baseUrl);
-        
-        // Copy all search params from the request URL that the proxy received.
+        // Resumable Upload PUT requests are sent to a path like /gemini/upload/v1beta/files...
+        // The ctx.path will be /upload/v1beta/files...
+        if (ctx.originalRequest.method === 'PUT' && ctx.path.startsWith('/upload/')) {
+            const targetUrl = new URL(GEMINI_UPLOAD_URL); // e.g. https://generativelanguage.googleapis.com/upload
+            targetUrl.pathname = ctx.path; // e.g. /upload/v1beta/files
+            targetUrl.search = ctx.originalUrl.search; // all original query params
+            return targetUrl;
+        }
+
+        // For other requests, including the initial POST to create an upload session
+        const isUpload = ctx.originalRequest.method === 'POST' && ctx.path.includes('/files');
+        const baseUrl = isUpload ? GEMINI_UPLOAD_URL : GEMINI_BASE_URL;
+        const url = new URL(ctx.path, baseUrl);
+
+        // Copy search params from original request, excluding auth key
         ctx.originalUrl.searchParams.forEach((v, k) => {
-            finalUrl.searchParams.set(k, v);
+            if (k.toLowerCase() !== 'key') {
+                url.searchParams.set(k, v);
+            }
         });
-        
-        // Now, explicitly remove the 'key' param, as it's for proxy auth only.
-        // The real auth key will be in the x-goog-api-key header.
-        finalUrl.searchParams.delete('key');
-        
-        return finalUrl;
+
+        return url;
     }
     override buildRequestHeaders(ctx: StrategyContext, auth: AuthenticationDetails) {
         const h = buildBaseProxyHeaders(ctx.originalRequest.headers);
@@ -358,7 +376,7 @@ export class GeminiNativeStrategy extends BaseStrategy {
         }
         return h;
     }
-    override async handleResponse(res: Response, ctx: StrategyContext, auth: AuthenticationDetails): Promise<Response> {
+    override async handleResponse(res: Response, ctx: StrategyContext): Promise<Response> {
         const uploadUrlHeader = res.headers.get('x-goog-upload-url');
 
         if (uploadUrlHeader) {
@@ -369,9 +387,10 @@ export class GeminiNativeStrategy extends BaseStrategy {
                 proxyUrl.pathname = `${ctx.prefix}${googleUploadUrl.pathname}`;
                 proxyUrl.search = googleUploadUrl.search;
 
-                // 使用已经确定的认证密钥，而不是重新解析
-                if (auth.key) {
-                    proxyUrl.searchParams.set('key', auth.key);
+                // 将 API 密钥嵌入重写后的 URL，以便后续的 PUT 请求能够被认证。
+                const userApiKey = getApiKeyFromReq({ req: { header: (name: string) => ctx.originalRequest.headers.get(name) } } as Context, ctx.originalUrl);
+                if (userApiKey) {
+                    proxyUrl.searchParams.set('key', userApiKey);
                 }
 
                 const newHeaders = new Headers(res.headers);
