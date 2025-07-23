@@ -35,11 +35,16 @@ export const isStatefulRequest = (ctx: StrategyContext): boolean => {
     if (ctx.isWebSocket) return true;
 
     // 检查路径中是否包含有状态的 API 端点名称，忽略版本号
-    const statefulEndpoints = ['/files', '/tunedModels', '/operations', '/corpora'];
+    const statefulEndpoints = ['/files', '/tunedModels', '/operations', '/corpora', '/batches', '/cachedContents'];
     if (statefulEndpoints.some(p => ctx.path.includes(p))) return true;
 
     // 检查 generateContent 请求体中是否引用了 fileData
     if (ctx.parsedBody?.contents?.some((c: any) => c.parts?.some((p: any) => 'fileData' in p))) {
+        return true;
+    }
+
+    // 检查 generateContent 请求体中是否引用了 cachedContent
+    if (ctx.parsedBody?.cachedContent) {
         return true;
     }
 
@@ -88,7 +93,15 @@ export const _getGeminiAuthDetails = (c: Context, ctx: StrategyContext, model: s
     const userApiKey = getApiKeyFromReq(c, ctx.originalUrl);
     const isTriggerKey = userApiKey ? config.triggerKeys.has(userApiKey) : false;
 
-    // --- 1. 优先处理所有有状态请求 ---
+    // --- 1. 快速通道：如果用户使用自己的密钥，则直接返回，无需进行状态检查 ---
+    // 无论请求是有状态还是无状态，使用自己密钥的逻辑都是相同的。
+    if (userApiKey && !isTriggerKey) {
+        return { key: userApiKey, source: 'user', gcpToken: null, gcpProject: null, maxRetries: 1 };
+    }
+
+    // --- 2. 触发密钥和无密钥请求的逻辑 ---
+
+    // a) 处理有状态请求（此时仅可能是触发密钥或无密钥）
     if (isStatefulRequest(ctx)) {
         if (isTriggerKey) {
             // 对于触发密钥发起的有状态请求，必须使用备用密钥
@@ -97,23 +110,14 @@ export const _getGeminiAuthDetails = (c: Context, ctx: StrategyContext, model: s
             } else {
                 throw new Response(`Stateful request with Trigger Key cannot be processed: No fallbackKey configured.`, { status: 503 });
             }
-        } else if (userApiKey) {
-            // 对于非触发密钥发起的有状态请求，始终使用其自己的密钥
-            return { key: userApiKey, source: 'user', gcpToken: null, gcpProject: null, maxRetries: 1 };
         } else {
             // 拒绝无密钥的有状态请求
+            // (有密钥但非触发密钥的情况已在上面的快速通道中处理)
             throw new Response(`Stateful requests require an API key.`, { status: 401 });
         }
     }
 
-    // --- 2. 处理所有无状态请求 ---
-    
-    // a) 如果是非触发密钥，直接使用
-    if (userApiKey && !isTriggerKey) {
-        return { key: userApiKey, source: 'user', gcpToken: null, gcpProject: null, maxRetries: 1 };
-    }
-
-    // b) 如果是触发密钥或无密钥的无状态请求，执行轮询和重试逻辑
+    // b) 处理无状态请求（此时仅可能是触发密钥或无密钥）
     const isModels = ctx.path.endsWith('/models');
     let result: ApiKeyResult | null = null;
 

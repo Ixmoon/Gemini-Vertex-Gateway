@@ -326,6 +326,20 @@ export class GeminiNativeStrategy extends BaseStrategy {
         super();
     }
 
+    override async prepareRequestBody(req: Request) {
+        const contentLength = parseInt(req.headers.get('content-length') || '0', 10);
+        if (contentLength > 0 && contentLength < MAX_BUFFER_SIZE_BYTES) {
+            return this._bufferStreamInBackground(req);
+        }
+        console.warn(`Request body size (${contentLength} bytes) is out of bufferable range. Retries disabled.`);
+        return {
+            bodyForFirstAttempt: req.body,
+            getCachedBodyForRetry: () => Promise.resolve(null),
+            parsedBodyPromise: Promise.resolve(null),
+            retriesEnabled: false,
+        };
+    }
+
     override getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
         // For native requests, the model is in the URL path, not the body.
         const model = ctx.path.match(/\/models\/([^:]+):/)?.[1] ?? null;
