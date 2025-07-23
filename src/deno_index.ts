@@ -122,7 +122,16 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
     try {
         const strategy = await strategyManager.get(type);
 
-        const { bodyForFirstAttempt, getCachedBodyForRetry, parsedBodyPromise, retriesEnabled } = await strategy.prepareRequestBody(originalReq);
+        // 准备一个临时的 context，仅用于 prepareRequestBody
+        const tempContextForPrepare: StrategyContext = {
+            originalUrl: url,
+            originalRequest: originalReq,
+            parsedBody: null, // 在这个阶段 parsedBody 还不可用
+            isWebSocket: false,
+            ...details
+        };
+
+        const { bodyForFirstAttempt, getCachedBodyForRetry, parsedBodyPromise, retriesEnabled } = await strategy.prepareRequestBody(originalReq, c, tempContextForPrepare);
 
         let attempts = 0, maxRetries = 1, lastError: Response | null = null;
         let bodyForCurrentAttempt = bodyForFirstAttempt;

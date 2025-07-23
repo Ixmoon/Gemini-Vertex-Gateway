@@ -62,7 +62,7 @@ export interface StrategyContext {
  */
 export interface RequestHandlerStrategy {
     /** 获取该策略所需的认证信息 */
-    getAuthenticationDetails(c: unknown, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails>;
+    getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails>;
     /** 构建目标服务的 URL */
     buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL | Promise<URL>;
     /** 构建发往目标服务的请求头 */
@@ -71,9 +71,11 @@ export interface RequestHandlerStrategy {
      * (新增) 处理请求体，为 fetch 做准备。
      * 策略可以决定是缓存它、流式传输它，还是转换它。
      * @param req 原始请求对象
+     * @param c Hono 上下文，用于访问请求头等信息
+     * @param ctx 策略上下文
      * @returns 一个包含流式 body、缓存 body 的 promise 以及解析后 body 的 promise 的对象。
      */
-    prepareRequestBody(req: Request): Promise<{
+    prepareRequestBody(req: Request, c: Context, ctx: StrategyContext): Promise<{
         bodyForFirstAttempt: BodyInit | null;
         getCachedBodyForRetry: () => Promise<BodyInit | null>;
         parsedBodyPromise: Promise<Record<string, any> | null>;
@@ -84,5 +86,5 @@ export interface RequestHandlerStrategy {
     /** (可选) 在收到目标服务响应后，返回给客户端之前进行处理 */
     handleResponse?(res: Response, ctx: StrategyContext): Promise<Response>;
     /** (可选) 处理 WebSocket 升级请求并建立双向代理 */
-    handleWebSocketProxy?(c: unknown, ctx: StrategyContext): Promise<Response>;
+    handleWebSocketProxy?(c: Context, ctx: StrategyContext): Promise<Response>;
 }

@@ -105,7 +105,26 @@ abstract class BaseStrategy implements RequestHandlerStrategy {
 
         const cachePromise = (async () => {
             try {
-                return await new Response(stream2).arrayBuffer();
+                const reader = stream2.getReader();
+                const chunks: Uint8Array[] = [];
+                let totalSize = 0;
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    totalSize += value.length;
+                    if (totalSize > MAX_BUFFER_SIZE_BYTES) {
+                        await reader.cancel();
+                        throw new Error(`Request body exceeds max buffer size of ${MAX_BUFFER_SIZE_BYTES} bytes.`);
+                    }
+                    chunks.push(value);
+                }
+                const buffer = new Uint8Array(totalSize);
+                let offset = 0;
+                for (const chunk of chunks) {
+                    buffer.set(chunk, offset);
+                    offset += chunk.length;
+                }
+                return buffer.buffer;
             } catch (e) {
                 console.error("Error buffering stream in background:", e);
                 return null;
@@ -132,19 +151,45 @@ abstract class BaseStrategy implements RequestHandlerStrategy {
         };
     }
     
-    // 默认实现，子类可以覆盖
-    prepareRequestBody(req: Request): Promise<{
-        bodyForFirstAttempt: BodyInit | null;
-        getCachedBodyForRetry: () => Promise<BodyInit | null>;
-        parsedBodyPromise: Promise<Record<string, any> | null>;
-        retriesEnabled: boolean;
-    }> {
-        return Promise.resolve({
+    async prepareRequestBody(req: Request, c: Context, ctx: StrategyContext) {
+        if (!req.body) {
+            return {
+                bodyForFirstAttempt: null,
+                getCachedBodyForRetry: () => Promise.resolve(null),
+                parsedBodyPromise: Promise.resolve(null),
+                retriesEnabled: false
+            };
+        }
+        
+        // 关键决策：只有当请求可能需要重试时（即使用触发密钥），才考虑缓冲。
+        const config = configManager.getSync();
+        const userApiKey = getApiKeyFromReq(c, ctx.originalUrl);
+        const isTriggerKey = userApiKey ? config.triggerKeys.has(userApiKey) : false;
+
+        if (isTriggerKey) {
+            const contentLengthStr = req.headers.get('content-length');
+            const transferEncoding = req.headers.get('transfer-encoding');
+
+            if (contentLengthStr) {
+                const contentLength = parseInt(contentLengthStr, 10);
+                if (contentLength > 0 && contentLength < MAX_BUFFER_SIZE_BYTES) {
+                    return this._bufferStreamInBackground(req);
+                } else {
+                    console.warn(`Trigger Key Request with body size (${contentLength} bytes) is out of bufferable range. Retries disabled.`);
+                }
+            } else if (transferEncoding?.includes('chunked')) {
+                console.warn(`Trigger Key Request with chunked encoding. Attempting to buffer for retries.`);
+                return this._bufferStreamInBackground(req);
+            }
+        }
+        
+        // 对于非触发密钥的请求（或任何不满足缓冲条件的请求），直接流式传输，不进行缓冲。
+        return {
             bodyForFirstAttempt: req.body,
             getCachedBodyForRetry: () => Promise.resolve(null),
             parsedBodyPromise: Promise.resolve(null),
             retriesEnabled: false,
-        });
+        };
     }
 
     transformRequestBody?(body: Record<string, any> | null, _ctx: StrategyContext): Record<string, any> | null {
@@ -211,20 +256,6 @@ export class VertexAIStrategy extends BaseStrategy {
         return headers;
     }
 
-    override async prepareRequestBody(req: Request) {
-        const contentLength = parseInt(req.headers.get('content-length') || '0', 10);
-        if (contentLength > 0 && contentLength < MAX_BUFFER_SIZE_BYTES) {
-            return this._bufferStreamInBackground(req);
-        }
-        console.warn(`Request body size (${contentLength} bytes) is out of bufferable range. Retries disabled.`);
-        return {
-            bodyForFirstAttempt: req.body,
-            getCachedBodyForRetry: () => Promise.resolve(null),
-            parsedBodyPromise: Promise.resolve(null),
-            retriesEnabled: false,
-        };
-    }
-
     override transformRequestBody(body: Record<string, any> | null): Record<string, any> | null {
         if (!body) return null;
 
@@ -257,19 +288,6 @@ export class GeminiOpenAIStrategy extends BaseStrategy {
         super();
     }
 
-    override async prepareRequestBody(req: Request) {
-        const contentLength = parseInt(req.headers.get('content-length') || '0', 10);
-        if (contentLength > 0 && contentLength < MAX_BUFFER_SIZE_BYTES) {
-            return this._bufferStreamInBackground(req);
-        }
-        console.warn(`Request body size (${contentLength} bytes) is out of bufferable range. Retries disabled.`);
-        return {
-            bodyForFirstAttempt: req.body,
-            getCachedBodyForRetry: () => Promise.resolve(null),
-            parsedBodyPromise: Promise.resolve(null),
-            retriesEnabled: false,
-        };
-    }
 
     override getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
         const model = ctx.parsedBody?.model ?? null;
@@ -326,19 +344,6 @@ export class GeminiNativeStrategy extends BaseStrategy {
         super();
     }
 
-    override async prepareRequestBody(req: Request) {
-        const contentLength = parseInt(req.headers.get('content-length') || '0', 10);
-        if (contentLength > 0 && contentLength < MAX_BUFFER_SIZE_BYTES) {
-            return this._bufferStreamInBackground(req);
-        }
-        console.warn(`Request body size (${contentLength} bytes) is out of bufferable range. Retries disabled.`);
-        return {
-            bodyForFirstAttempt: req.body,
-            getCachedBodyForRetry: () => Promise.resolve(null),
-            parsedBodyPromise: Promise.resolve(null),
-            retriesEnabled: false,
-        };
-    }
 
     override getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
         // For native requests, the model is in the URL path, not the body.
