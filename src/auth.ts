@@ -88,16 +88,6 @@ export const _getGeminiAuthDetails = (c: Context, ctx: StrategyContext, model: s
     const userApiKey = getApiKeyFromReq(c, ctx.originalUrl);
     const isTriggerKey = userApiKey ? config.triggerKeys.has(userApiKey) : false;
 
-    // 强制为所有有状态文件操作使用备用密钥，以解决会话一致性问题。
-    // 这是一个硬编码的规则，优先于下面的通用有状态/无状态逻辑。
-    if (isTriggerKey && (ctx.path.includes('/files') || ctx.path.includes('/tunedModels'))) {
-        if (config.fallbackKey) {
-            return { key: config.fallbackKey, source: 'fallback', gcpToken: null, gcpProject: null, maxRetries: 1 };
-        } else {
-            throw new Response(`Stateful request with Trigger Key for '${ctx.path}' cannot be processed: No fallbackKey configured.`, { status: 503 });
-        }
-    }
-
     // --- 1. 优先处理所有有状态请求 ---
     if (isStatefulRequest(ctx)) {
         if (isTriggerKey) {
