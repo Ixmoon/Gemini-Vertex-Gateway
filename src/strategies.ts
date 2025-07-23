@@ -23,6 +23,62 @@ const MAX_BUFFER_SIZE_BYTES = 100 * 1024 * 1024; // 100MB
 // --- 0. 基础策略与辅助函数 ---
 // =================================================================================
 
+/**
+ * 在两个 WebSocket 连接之间建立双向代理。
+ * @param clientSocket 客户端 WebSocket 连接
+ * @param backendSocket 后端服务 WebSocket 连接
+ */
+const _proxyWebSocket = (client: WebSocket, backend: WebSocket) => {
+    let hasClosed = false;
+
+    // 统一的清理函数，确保两个连接都被关闭并移除监听器
+    const cleanup = (code = 1001, reason = "Proxy connection closed") => {
+        if (hasClosed) return;
+        hasClosed = true;
+        
+        // 移除所有事件监听器以防止内存泄漏和意外行为
+        client.onmessage = backend.onmessage = null;
+        client.onerror = backend.onerror = null;
+        client.onclose = backend.onclose = null;
+        
+        // 如果连接尚未关闭，则使用提供的代码和原因关闭它
+        if (client.readyState < WebSocket.CLOSING) client.close(code, reason);
+        if (backend.readyState < WebSocket.CLOSING) backend.close(code, reason);
+    };
+
+    client.onmessage = (event) => {
+        // 在转发消息前检查后端连接是否打开
+        if (backend.readyState === WebSocket.OPEN) {
+            backend.send(event.data);
+        } else {
+            cleanup(1011, "Backend connection not open");
+        }
+    };
+
+    backend.onmessage = (event) => {
+        // 在转发消息前检查客户端连接是否打开
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(event.data);
+        } else {
+            cleanup(1011, "Client connection not open");
+        }
+    };
+    
+    // 当任一连接关闭时，确保另一个也关闭，并传递关闭事件
+    client.onclose = (event) => cleanup(event.code, event.reason);
+    backend.onclose = (event) => cleanup(event.code, event.reason);
+
+    // 当任一连接出错时，记录错误并关闭两个连接
+    client.onerror = (event) => {
+        console.error("Client WebSocket error:", event instanceof ErrorEvent ? event.error : event);
+        cleanup(1011, "Client-side error");
+    };
+    backend.onerror = (event) => {
+        console.error("Backend WebSocket error:", event instanceof ErrorEvent ? event.error : event);
+        cleanup(1011, "Backend-side error");
+    };
+};
+
 abstract class BaseStrategy implements RequestHandlerStrategy {
     abstract getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails>;
     abstract buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL | Promise<URL>;
@@ -97,6 +153,10 @@ abstract class BaseStrategy implements RequestHandlerStrategy {
 
     handleResponse?(res: Response, _ctx: StrategyContext): Promise<Response> {
         return Promise.resolve(res);
+    }
+
+    handleWebSocketProxy?(c: Context, _ctx: StrategyContext): Promise<Response> {
+        return Promise.resolve(c.text("WebSocket proxy not implemented for this strategy", 501));
     }
 }
 
@@ -303,21 +363,6 @@ export class GeminiNativeStrategy extends BaseStrategy {
         }
         return h;
     }
-    public buildWebSocketTarget(ctx: StrategyContext): URL {
-        const url = new URL(GEMINI_BASE_URL);
-        url.protocol = 'wss:';
-        url.pathname = ctx.path;
-    
-        // 复制所有查询参数，除了用于用户认证的 'key'
-        ctx.originalUrl.searchParams.forEach((v, k) => {
-            if (k.toLowerCase() !== 'key') {
-                url.searchParams.set(k, v);
-            }
-        });
-    
-        return url;
-    }
-
     override async handleResponse(res: Response, ctx: StrategyContext): Promise<Response> {
         const uploadUrlHeader = res.headers.get('x-goog-upload-url');
 
@@ -354,6 +399,30 @@ export class GeminiNativeStrategy extends BaseStrategy {
         }
 
         return res;
+    }
+
+    override async handleWebSocketProxy(c: Context, ctx: StrategyContext): Promise<Response> {
+        const auth = await this.getAuthenticationDetails(c, ctx, 1);
+        if (!auth.key) {
+            return c.text("Authentication failed for WebSocket proxy.", 401);
+        }
+
+        const targetUrl = new URL(GEMINI_BASE_URL);
+        targetUrl.protocol = 'wss:';
+        targetUrl.pathname = ctx.path;
+        ctx.originalUrl.searchParams.forEach((v, k) => {
+            if (k.toLowerCase() !== 'key') {
+                targetUrl.searchParams.set(k, v);
+            }
+        });
+        targetUrl.searchParams.set('key', auth.key);
+
+        const { response, socket: clientSocket } = Deno.upgradeWebSocket(c.req.raw);
+        const backendSocket = new WebSocket(targetUrl);
+
+        _proxyWebSocket(clientSocket, backendSocket);
+
+        return response;
     }
 }
 

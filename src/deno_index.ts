@@ -15,7 +15,6 @@
 import { Hono, Context } from "hono";
 import { configManager, strategyManager } from "./managers.ts";
 import type { RequestType, StrategyContext } from "./types.ts";
-import { GeminiNativeStrategy } from "./strategies.ts";
 
 // =================================================================================
 // --- 1. 策略选择器与主处理函数 ---
@@ -67,86 +66,38 @@ const determineRequestType = (c: Context): { type: RequestType | "UNKNOWN", pref
 };
 
 /**
- * 处理 WebSocket 升级请求并建立双向代理。
+ * 处理 WebSocket 升级请求的通用分发器。
  */
 const handleWebSocketProxy = async (c: Context): Promise<Response> => {
-    const upgradeHeader = c.req.header('Upgrade');
-    if (upgradeHeader?.toLowerCase() !== 'websocket') {
+    if (c.req.header('Upgrade')?.toLowerCase() !== 'websocket') {
         return c.text('Expected Upgrade: websocket', 426);
     }
 
-    const url = new URL(c.req.url);
     const { type, ...details } = determineRequestType(c);
 
-    if (type !== "GEMINI_NATIVE") {
-        return c.text(`WebSocket proxy is only supported for GEMINI_NATIVE, but got ${type}`, 400);
+    if (type === "UNKNOWN") {
+        return c.text(`WebSocket proxy not available for unknown route`, 404);
     }
 
     try {
-        const strategy = await strategyManager.get(type) as GeminiNativeStrategy;
+        const strategy = await strategyManager.get(type);
+        if (!strategy.handleWebSocketProxy) {
+            return c.text(`WebSocket proxy is not implemented for the '${type}' strategy.`, 501);
+        }
+
         const context: StrategyContext = {
-            originalUrl: url,
+            originalUrl: new URL(c.req.url),
             originalRequest: c.req.raw,
             parsedBody: null,
             isWebSocket: true,
             ...details
         };
 
-        const auth = await strategy.getAuthenticationDetails(c, context, 1);
-        if (!auth.key) {
-            return c.text("Authentication failed for WebSocket proxy.", 401);
-        }
-        
-        const targetUrl = strategy.buildWebSocketTarget(context);
-        targetUrl.searchParams.set('key', auth.key);
-
-        const { response, socket: clientSocket } = Deno.upgradeWebSocket(c.req.raw);
-
-        // Deno 的 WebSocket 构造函数不支持自定义头部。
-        // API 密钥通过 URL 查询参数 `key` 传递。
-        const googleSocket = new WebSocket(targetUrl);
-
-        clientSocket.onopen = () => console.log("Client WebSocket connected.");
-        googleSocket.onopen = () => console.log("Backend WebSocket connected.");
-
-        clientSocket.onmessage = (event) => {
-            if (googleSocket.readyState === WebSocket.OPEN) {
-                googleSocket.send(event.data);
-            }
-        };
-        googleSocket.onmessage = (event) => {
-            if (clientSocket.readyState === WebSocket.OPEN) {
-                clientSocket.send(event.data);
-            }
-        };
-
-        const closeHandler = (event: CloseEvent) => {
-            console.log(`WebSocket closed: ${event.code} ${event.reason}`);
-            // 确保我们使用一个有效的关闭码。如果上游关闭码无效，则使用 1000。
-            const code = (event.code === 1000 || (event.code >= 3000 && event.code <= 4999)) ? event.code : 1000;
-            if (clientSocket.readyState !== WebSocket.CLOSED) clientSocket.close(code, event.reason);
-            if (googleSocket.readyState !== WebSocket.CLOSED) googleSocket.close(code, event.reason);
-        };
-        const errorHandler = (event: Event) => {
-            const reason = event instanceof ErrorEvent ? event.message : "Unknown error";
-            // 客户端主动取消连接是正常现象，完全静默处理
-            if (!reason.includes("operation canceled")) {
-                console.error("WebSocket error:", event);
-            }
-            // 总是使用 1000 (Normal Closure) 来关闭，因为这是由我们的代理发起的
-            if (clientSocket.readyState < WebSocket.CLOSING) clientSocket.close(1000, reason);
-            if (googleSocket.readyState < WebSocket.CLOSING) googleSocket.close(1000, reason);
-        };
-
-        clientSocket.onclose = closeHandler;
-        googleSocket.onclose = closeHandler;
-        clientSocket.onerror = errorHandler;
-        googleSocket.onerror = errorHandler;
-
-        return response;
+        // 将处理逻辑完全委托给策略
+        return await strategy.handleWebSocketProxy(c, context);
 
     } catch (error) {
-        console.error(`Critical error in handleWebSocketProxy:`, error);
+        console.error(`Critical error in handleWebSocketProxy for type ${type}:`, error);
         return c.text(`Internal Server Error: ${error instanceof Error ? error.message : "Unknown"}`, 500);
     }
 };
