@@ -128,10 +128,12 @@ const handleWebSocketProxy = async (c: Context): Promise<Response> => {
             if (googleSocket.readyState !== WebSocket.CLOSED) googleSocket.close(code, event.reason);
         };
         const errorHandler = (event: Event) => {
-            console.error("WebSocket error:", event);
             const reason = event instanceof ErrorEvent ? event.message : "Unknown error";
-            // 总是使用 1000 (Normal Closure) 或 1011 (Server Error) 等来关闭，但发起关闭时不能用 1011
-            // 因此，我们使用一个通用的错误代码 1000。
+            // 客户端主动取消连接是正常现象，完全静默处理
+            if (!reason.includes("operation canceled")) {
+                console.error("WebSocket error:", event);
+            }
+            // 总是使用 1000 (Normal Closure) 来关闭，因为这是由我们的代理发起的
             if (clientSocket.readyState < WebSocket.CLOSING) clientSocket.close(1000, reason);
             if (googleSocket.readyState < WebSocket.CLOSING) googleSocket.close(1000, reason);
         };
