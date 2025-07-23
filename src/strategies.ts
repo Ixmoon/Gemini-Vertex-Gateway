@@ -34,12 +34,14 @@ abstract class BaseStrategy implements RequestHandlerStrategy {
         bodyForFirstAttempt: ReadableStream<Uint8Array> | null;
         getCachedBodyForRetry: () => Promise<ArrayBuffer | null>;
         parsedBodyPromise: Promise<Record<string, any> | null>;
+        retriesEnabled: boolean;
     } {
         if (!req.body) {
             return {
                 bodyForFirstAttempt: null,
                 getCachedBodyForRetry: () => Promise.resolve(null),
                 parsedBodyPromise: Promise.resolve(null),
+                retriesEnabled: false,
             };
         }
 
@@ -70,6 +72,7 @@ abstract class BaseStrategy implements RequestHandlerStrategy {
             bodyForFirstAttempt: stream1,
             getCachedBodyForRetry: () => cachePromise,
             parsedBodyPromise,
+            retriesEnabled: true,
         };
     }
     
@@ -78,11 +81,13 @@ abstract class BaseStrategy implements RequestHandlerStrategy {
         bodyForFirstAttempt: BodyInit | null;
         getCachedBodyForRetry: () => Promise<BodyInit | null>;
         parsedBodyPromise: Promise<Record<string, any> | null>;
+        retriesEnabled: boolean;
     }> {
         return Promise.resolve({
             bodyForFirstAttempt: req.body,
             getCachedBodyForRetry: () => Promise.resolve(null),
             parsedBodyPromise: Promise.resolve(null),
+            retriesEnabled: false,
         });
     }
 
@@ -156,6 +161,7 @@ export class VertexAIStrategy extends BaseStrategy {
             bodyForFirstAttempt: req.body,
             getCachedBodyForRetry: () => Promise.resolve(null),
             parsedBodyPromise: Promise.resolve(null),
+            retriesEnabled: false,
         };
     }
 
@@ -201,6 +207,7 @@ export class GeminiOpenAIStrategy extends BaseStrategy {
             bodyForFirstAttempt: req.body,
             getCachedBodyForRetry: () => Promise.resolve(null),
             parsedBodyPromise: Promise.resolve(null),
+            retriesEnabled: false,
         };
     }
 

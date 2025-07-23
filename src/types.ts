@@ -77,6 +77,7 @@ export interface RequestHandlerStrategy {
         bodyForFirstAttempt: BodyInit | null;
         getCachedBodyForRetry: () => Promise<BodyInit | null>;
         parsedBodyPromise: Promise<Record<string, any> | null>;
+        retriesEnabled: boolean;
     }>;
     /** (可选) 转换已解析的请求体对象 */
     transformRequestBody?(body: Record<string, any> | null, ctx: StrategyContext): Record<string, any> | null;

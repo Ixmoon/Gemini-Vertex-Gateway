@@ -171,7 +171,7 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
     try {
         const strategy = await strategyManager.get(type);
 
-        const { bodyForFirstAttempt, getCachedBodyForRetry, parsedBodyPromise } = await strategy.prepareRequestBody(originalReq);
+        const { bodyForFirstAttempt, getCachedBodyForRetry, parsedBodyPromise, retriesEnabled } = await strategy.prepareRequestBody(originalReq);
 
         let attempts = 0, maxRetries = 1, lastError: Response | null = null;
         let bodyForCurrentAttempt = bodyForFirstAttempt;
@@ -200,9 +200,7 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
                 const auth = await strategy.getAuthenticationDetails(c, context, attempts);
                 
                 if (attempts === 1) {
-                    // 只有当 getCachedBodyForRetry 返回有效 promise 时才启用重试
-                    const potentialCachedBody = await getCachedBodyForRetry();
-                    maxRetries = potentialCachedBody ? auth.maxRetries : 1;
+                    maxRetries = retriesEnabled ? auth.maxRetries : 1;
                 }
                 
                 const transformedBody = strategy.transformRequestBody
