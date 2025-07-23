@@ -124,7 +124,7 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
 
         const { bodyForFirstAttempt, getCachedBodyForRetry, parsedBodyPromise, retriesEnabled } = await strategy.prepareRequestBody(originalReq, c);
 
-        let attempts = 0, maxRetries = 1, lastError: Response | null = null;
+        let attempts = 0, maxRetries = 1;
         let bodyForCurrentAttempt = bodyForFirstAttempt;
 
         while (attempts < maxRetries) {
@@ -134,7 +134,8 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
                     const cachedBody = await getCachedBodyForRetry();
                     if (!cachedBody) {
                         console.warn("Aborting retry: Body was not cached or cache failed.");
-                        break;
+                        // 如果缓存失败，无法继续重试，直接返回通用错误
+                        return c.json({ error: "Request failed: cannot get cached body for retry." }, 500);
                     }
                     bodyForCurrentAttempt = cachedBody;
                 }
@@ -142,7 +143,6 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
                 const context: StrategyContext = {
                     originalUrl: url,
                     originalRequest: originalReq,
-                    // 注意：我们现在异步等待解析后的 body
                     parsedBody: await parsedBodyPromise,
                     isWebSocket: false,
                     ...details
@@ -174,34 +174,49 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
                     signal: originalReq.signal,
                 });
 
-                if (!res.ok) {
-                    const errorBodyText = await res.text();
-                    console.error(`Upstream request to ${targetUrl.hostname} FAILED. Status: ${res.status}. Body: ${errorBodyText}`);
-                    lastError = new Response(errorBodyText, { status: res.status, statusText: res.statusText, headers: res.headers });
-                    if (attempts >= maxRetries) break; else continue;
+                // 如果请求成功，直接处理并返回
+                if (res.ok) {
+                    const finalContext: StrategyContext = { ...context, parsedBody: transformedBody };
+                    return strategy.handleResponse ? await strategy.handleResponse(res, finalContext) : res;
                 }
-                
-                const finalContext: StrategyContext = { ...context, parsedBody: transformedBody };
-                return strategy.handleResponse ? await strategy.handleResponse(res, finalContext) : res;
+
+                // --- 错误处理逻辑 ---
+                if (attempts < maxRetries) {
+                    continue; // 继续下一次循环
+                }
+
+                // 这是最后一次尝试的失败
+                console.error(`Upstream request to ${targetUrl.hostname} FAILED on last attempt (${attempts}/${maxRetries}). Status: ${res.status}.`);
+                if (res.body) {
+                    // 使用 tee 将流分叉，一路用于日志，一路返回给客户端
+                    const [logStream, clientStream] = res.body.tee();
+                    const errorBodyText = await new Response(logStream).text();
+                    console.error(`Error Body: ${errorBodyText}`);
+                    return new Response(clientStream, { status: res.status, statusText: res.statusText, headers: res.headers });
+                }
+                return new Response("Upstream request failed with no body.", { status: res.status, statusText: res.statusText });
 
             } catch (error) {
                 if (error instanceof Response) {
-                    // 克隆响应以避免 "body already consumed" 错误。
-                    // 我们读取 body 文本，然后为 lastError 创建一个新的 Response 对象。
-                    const errorBodyText = await error.text(); // 消费原始错误响应的 body
-                    lastError = new Response(errorBodyText, { // 创建一个全新的响应
-                        status: error.status,
-                        statusText: error.statusText,
-                        headers: error.headers,
-                    });
-
-                    if (attempts >= maxRetries) break; else continue;
+                    if (attempts < maxRetries) {
+                        continue;
+                    }
+                    // 最后一次尝试失败
+                    console.error(`Strategy threw a Response FAILED on last attempt (${attempts}/${maxRetries}). Status: ${error.status}.`);
+                    if (error.body) {
+                        const [logStream, clientStream] = error.body.tee();
+                        const errorBodyText = await new Response(logStream).text();
+                        console.error(`Error Body: ${errorBodyText}`);
+                        return new Response(clientStream, { status: error.status, statusText: error.statusText, headers: error.headers });
+                    }
+                    return new Response("Strategy check failed with no body.", { status: error.status, statusText: error.statusText });
                 }
                 // 如果不是 Response 实例，则重新抛出，因为这是意外错误。
                 throw error;
             }
         }
-        return lastError ?? c.json({ error: "Request failed after all retries." }, 502);
+        // 循环正常结束，但没有返回任何内容（理论上不应发生，除非maxRetries=0）
+        return c.json({ error: "Request failed after all retries." }, 502);
 
     } catch (error) {
         console.error(`Critical error in handleGenericProxy for ${type}:`, error);

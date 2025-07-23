@@ -32,8 +32,6 @@ export const apiMappings: Record<string, string> = ${JSON.stringify(secrets.apiM
   const outputPath = "src/config_data.ts";
   await Deno.writeTextFile(outputPath, tsContent);
 
-  console.log(`✅ 成功生成配置文件: ${outputPath}`);
-
 } catch (error) {
   if (error instanceof Deno.errors.NotFound) {
     console.error("❌ 错误: 未找到 'secrets.config.json' 文件。");

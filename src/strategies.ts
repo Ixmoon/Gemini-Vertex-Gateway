@@ -15,6 +15,7 @@ import { configManager } from "./managers.ts";
 import type { AppConfig } from "./managers.ts";
 import type { AuthenticationDetails, RequestHandlerStrategy, StrategyContext } from "./types.ts";
 import { getApiKeyFromReq, buildBaseProxyHeaders, _getGeminiAuthDetails } from "./auth.ts";
+import { createStreamingTextReplacer } from "./utils.ts";
 
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 const GEMINI_UPLOAD_URL = "https://generativelanguage.googleapis.com/upload";
@@ -182,9 +183,7 @@ abstract class BaseStrategy implements RequestHandlerStrategy {
             if (contentLength > 0 && contentLength < MAX_BUFFER_SIZE_BYTES) {
                 return this._bufferStreamInBackground(req);
             }
-            console.warn(`Request body size (${contentLength} bytes) is out of bufferable range. Retries disabled.`);
         } else if (transferEncoding?.includes('chunked')) {
-            console.warn(`Request with chunked encoding. Attempting to buffer for retries. Buffering will fail if body exceeds ${MAX_BUFFER_SIZE_BYTES} bytes.`);
             return this._bufferStreamInBackground(req);
         }
         
@@ -319,23 +318,21 @@ export class GeminiOpenAIStrategy extends BaseStrategy {
     }
 
     override async handleResponse(res: Response, ctx: StrategyContext): Promise<Response> {
-        if (!ctx.path.endsWith('/models') || !res.headers.get("content-type")?.includes("json")) return res;
-        try {
-            const body = await res.json();
-            if (body?.data?.length) {
-                body.data.forEach((m: Record<string, any>) => {
-                    if (m.id?.startsWith('models/')) {
-                        m.id = m.id.slice(7);
-                    }
-                });
-                const newBody = JSON.stringify(body);
-                const h = new Headers(res.headers);
-                h.delete('Content-Encoding');
-                h.set('Content-Length', String(new TextEncoder().encode(newBody).byteLength));
-                return new Response(newBody, { status: res.status, statusText: res.statusText, headers: h });
-            }
-            return new Response(JSON.stringify(body), { status: res.status, statusText: res.statusText, headers: res.headers });
-        } catch { return res; }
+        // 优化的流式处理：仅当路径匹配时，才通过流式替换器处理响应。
+        if (ctx.path.endsWith('/models') && res.body && res.headers.get("content-type")?.includes("json")) {
+            const replacer = createStreamingTextReplacer({ '"models/': '"' });
+            const newHeaders = new Headers(res.headers);
+            newHeaders.delete('content-length');
+            newHeaders.delete('content-encoding');
+            
+            return new Response(res.body.pipeThrough(replacer), {
+                status: res.status,
+                statusText: res.statusText,
+                headers: newHeaders
+            });
+        }
+        // 对于所有其他情况，直接返回原始响应。
+        return res;
     }
 }
 

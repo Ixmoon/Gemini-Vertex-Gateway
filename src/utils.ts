@@ -73,3 +73,38 @@ export class OptimizedRoundRobinSelector<T> {
         this.currentIndex = 0;
     }
 }
+
+/**
+ * 创建一个 `TransformStream`，它可以在流式传输文本时执行查找和替换。
+ * 这对于在不缓冲整个响应体的情况下修改流内容非常有用。
+ *
+ * @param replacements 一个记录，键是要查找的字符串，值是替换的字符串。
+ * @returns 一个 `TransformStream`，可用于 `readableStream.pipeThrough()`。
+ */
+export const createStreamingTextReplacer = (replacements: Record<string, string>): TransformStream<Uint8Array, Uint8Array> => {
+    const decoder = new TextDecoder();
+    const encoder = new TextEncoder();
+    let buffer = "";
+    const maxKeyLength = Math.max(...Object.keys(replacements).map(k => k.length));
+
+    return new TransformStream({
+        transform(chunk, controller) {
+            buffer += decoder.decode(chunk, { stream: true });
+
+            Object.entries(replacements).forEach(([key, value]) => {
+                buffer = buffer.replaceAll(key, value);
+            });
+
+            const lastChunk = buffer.length > maxKeyLength;
+            const sliceEnd = lastChunk ? buffer.length - maxKeyLength : 0;
+            
+            if (sliceEnd > 0) {
+                controller.enqueue(encoder.encode(buffer.substring(0, sliceEnd)));
+                buffer = buffer.substring(sliceEnd);
+            }
+        },
+        flush(controller) {
+            controller.enqueue(encoder.encode(buffer));
+        }
+    });
+};
