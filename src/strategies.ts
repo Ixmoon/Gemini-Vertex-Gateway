@@ -17,21 +17,100 @@ import { getApiKeyFromReq, buildBaseProxyHeaders, _getGeminiAuthDetails } from "
 
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 const GEMINI_UPLOAD_URL = "https://generativelanguage.googleapis.com/upload";
+const MAX_BUFFER_SIZE_BYTES = 100 * 1024 * 1024; // 100MB
+
+// =================================================================================
+// --- 0. 基础策略与辅助函数 ---
+// =================================================================================
+
+abstract class BaseStrategy implements RequestHandlerStrategy {
+    abstract getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails>;
+    abstract buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL | Promise<URL>;
+    abstract buildRequestHeaders(ctx: StrategyContext, auth: AuthenticationDetails): Headers;
+
+    // 为需要重试的策略提供可重用的请求体缓冲方法
+    // 通过 Teeing 实现流式传输与异步缓存并行
+    protected _bufferStreamInBackground(req: Request): {
+        bodyForFirstAttempt: ReadableStream<Uint8Array> | null;
+        getCachedBodyForRetry: () => Promise<ArrayBuffer | null>;
+        parsedBodyPromise: Promise<Record<string, any> | null>;
+    } {
+        if (!req.body) {
+            return {
+                bodyForFirstAttempt: null,
+                getCachedBodyForRetry: () => Promise.resolve(null),
+                parsedBodyPromise: Promise.resolve(null),
+            };
+        }
+
+        const [stream1, stream2] = req.body.tee();
+
+        const cachePromise = (async () => {
+            try {
+                return await new Response(stream2).arrayBuffer();
+            } catch (e) {
+                console.error("Error buffering stream in background:", e);
+                return null;
+            }
+        })();
+
+        const parsedBodyPromise = (async () => {
+            const buffer = await cachePromise;
+            if (buffer && req.headers.get('content-type')?.includes('application/json')) {
+                try {
+                    return JSON.parse(new TextDecoder().decode(buffer));
+                } catch (e) {
+                    console.error("Error parsing buffered body:", e);
+                }
+            }
+            return null;
+        })();
+
+        return {
+            bodyForFirstAttempt: stream1,
+            getCachedBodyForRetry: () => cachePromise,
+            parsedBodyPromise,
+        };
+    }
+    
+    // 默认实现，子类可以覆盖
+    prepareRequestBody(req: Request): Promise<{
+        bodyForFirstAttempt: BodyInit | null;
+        getCachedBodyForRetry: () => Promise<BodyInit | null>;
+        parsedBodyPromise: Promise<Record<string, any> | null>;
+    }> {
+        return Promise.resolve({
+            bodyForFirstAttempt: req.body,
+            getCachedBodyForRetry: () => Promise.resolve(null),
+            parsedBodyPromise: Promise.resolve(null),
+        });
+    }
+
+    transformRequestBody?(body: Record<string, any> | null, _ctx: StrategyContext): Record<string, any> | null {
+        return body;
+    }
+
+    handleResponse?(res: Response, _ctx: StrategyContext): Promise<Response> {
+        return Promise.resolve(res);
+    }
+}
+
 
 // =================================================================================
 // --- 1. Vertex AI 策略 ---
 // =================================================================================
 
-export class VertexAIStrategy implements RequestHandlerStrategy {
+export class VertexAIStrategy extends BaseStrategy {
     private readonly config: AppConfig;
     private readonly gcpAuth: () => Promise<{ token: string; projectId: string; } | null>;
 
     constructor(config: AppConfig, gcpAuth: () => Promise<{ token: string; projectId: string; } | null>) {
+        super();
         this.config = config;
         this.gcpAuth = gcpAuth;
     }
 
-    async getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
+    override async getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
         const userKey = getApiKeyFromReq(c, ctx.originalUrl) || 'N/A';
         if (!this.config.triggerKeys.has(userKey)) {
             throw new Response("Forbidden: A valid trigger key is required for the /vertex endpoint.", { status: 403 });
@@ -43,7 +122,7 @@ export class VertexAIStrategy implements RequestHandlerStrategy {
         return { key: null, source: null, gcpToken: auth?.token || null, gcpProject: auth?.projectId || null, maxRetries: this.config.apiRetryLimit };
     }
 
-    buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
+    override buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
         if (!auth.gcpProject) throw new Error("Vertex AI requires a GCP Project ID.");
         const loc = this.config.gcpDefaultLocation;
         const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
@@ -59,7 +138,7 @@ export class VertexAIStrategy implements RequestHandlerStrategy {
         return url;
     }
 
-    buildRequestHeaders(ctx: StrategyContext, auth: AuthenticationDetails): Headers {
+    override buildRequestHeaders(ctx: StrategyContext, auth: AuthenticationDetails): Headers {
         if (!auth.gcpToken) throw new Error("Vertex AI requires a GCP Token.");
         const headers = buildBaseProxyHeaders(ctx.originalRequest.headers);
         headers.delete('authorization');
@@ -67,7 +146,20 @@ export class VertexAIStrategy implements RequestHandlerStrategy {
         return headers;
     }
 
-    transformRequestBody(body: Record<string, any> | null): Record<string, any> | null {
+    override async prepareRequestBody(req: Request) {
+        const contentLength = parseInt(req.headers.get('content-length') || '0', 10);
+        if (contentLength > 0 && contentLength < MAX_BUFFER_SIZE_BYTES) {
+            return this._bufferStreamInBackground(req);
+        }
+        console.warn(`Request body size (${contentLength} bytes) is out of bufferable range. Retries disabled.`);
+        return {
+            bodyForFirstAttempt: req.body,
+            getCachedBodyForRetry: () => Promise.resolve(null),
+            parsedBodyPromise: Promise.resolve(null),
+        };
+    }
+
+    override transformRequestBody(body: Record<string, any> | null): Record<string, any> | null {
         if (!body) return null;
 
         const bodyToModify = { ...body };
@@ -94,15 +186,29 @@ export class VertexAIStrategy implements RequestHandlerStrategy {
 // --- 2. Gemini (OpenAI-Compatible) 策略 ---
 // =================================================================================
 
-export class GeminiOpenAIStrategy implements RequestHandlerStrategy {
-    // This strategy no longer needs AppConfig
-    constructor() {}
+export class GeminiOpenAIStrategy extends BaseStrategy {
+    constructor() {
+        super();
+    }
 
-    getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
+    override async prepareRequestBody(req: Request) {
+        const contentLength = parseInt(req.headers.get('content-length') || '0', 10);
+        if (contentLength > 0 && contentLength < MAX_BUFFER_SIZE_BYTES) {
+            return this._bufferStreamInBackground(req);
+        }
+        console.warn(`Request body size (${contentLength} bytes) is out of bufferable range. Retries disabled.`);
+        return {
+            bodyForFirstAttempt: req.body,
+            getCachedBodyForRetry: () => Promise.resolve(null),
+            parsedBodyPromise: Promise.resolve(null),
+        };
+    }
+
+    override getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
         const model = ctx.parsedBody?.model ?? null;
         return Promise.resolve(_getGeminiAuthDetails(c, ctx, model, attempt, "Gemini OpenAI"));
     }
-    buildTargetUrl(ctx: StrategyContext): URL {
+    override buildTargetUrl(ctx: StrategyContext): URL {
         // 从原始路径中移除可选的 /v1 前缀，以获得标准的 OpenAI 路径
         let openAIPath = ctx.path;
         if (openAIPath.startsWith('/v1/')) {
@@ -116,16 +222,14 @@ export class GeminiOpenAIStrategy implements RequestHandlerStrategy {
         ctx.originalUrl.searchParams.forEach((v, k) => k.toLowerCase() !== 'key' && url.searchParams.set(k, v));
         return url;
     }
-    buildRequestHeaders(ctx: StrategyContext, auth: AuthenticationDetails): Headers {
+    override buildRequestHeaders(ctx: StrategyContext, auth: AuthenticationDetails): Headers {
         const headers = buildBaseProxyHeaders(ctx.originalRequest.headers);
         headers.delete('authorization'); headers.delete('x-goog-api-key');
         if (auth.key) headers.set('Authorization', `Bearer ${auth.key}`);
         return headers;
     }
 
-    // No transformation needed for the request body
-
-    async handleResponse(res: Response, ctx: StrategyContext): Promise<Response> {
+    override async handleResponse(res: Response, ctx: StrategyContext): Promise<Response> {
         if (!ctx.path.endsWith('/models') || !res.headers.get("content-type")?.includes("json")) return res;
         try {
             const body = await res.json();
@@ -150,16 +254,17 @@ export class GeminiOpenAIStrategy implements RequestHandlerStrategy {
 // --- 3. Gemini (Native) 策略 ---
 // =================================================================================
 
-export class GeminiNativeStrategy implements RequestHandlerStrategy {
-    // This strategy no longer needs AppConfig
-    constructor() {}
+export class GeminiNativeStrategy extends BaseStrategy {
+    constructor() {
+        super();
+    }
 
-    getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
+    override getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
         // For native requests, the model is in the URL path, not the body.
         const model = ctx.path.match(/\/models\/([^:]+):/)?.[1] ?? null;
         return Promise.resolve(_getGeminiAuthDetails(c, ctx, model, attempt, "Gemini Native"));
     }
-    buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
+    override buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
         // Resumable Upload PUT requests are sent to a path like /gemini/upload/v1beta/files...
         // The ctx.path will be /upload/v1beta/files...
         if (ctx.originalRequest.method === 'PUT' && ctx.path.startsWith('/upload/')) {
@@ -183,7 +288,7 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
 
         return url;
     }
-    buildRequestHeaders(ctx: StrategyContext, auth: AuthenticationDetails) {
+    override buildRequestHeaders(ctx: StrategyContext, auth: AuthenticationDetails) {
         const h = buildBaseProxyHeaders(ctx.originalRequest.headers);
         h.delete('authorization'); h.delete('x-goog-api-key');
         if (auth.key) {
@@ -206,7 +311,7 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
         return url;
     }
 
-    async handleResponse(res: Response, ctx: StrategyContext): Promise<Response> {
+    override async handleResponse(res: Response, ctx: StrategyContext): Promise<Response> {
         const uploadUrlHeader = res.headers.get('x-goog-upload-url');
 
         if (uploadUrlHeader) {
@@ -243,27 +348,26 @@ export class GeminiNativeStrategy implements RequestHandlerStrategy {
 
         return res;
     }
-    // No transformation needed for the request body
 }
 
 // =================================================================================
 // --- 4. 通用代理策略 ---
 // =================================================================================
 
-export class GenericProxyStrategy implements RequestHandlerStrategy {
+export class GenericProxyStrategy extends BaseStrategy {
     private readonly config: AppConfig;
 
     constructor(config: AppConfig) {
+        super();
         this.config = config;
     }
 
-    getAuthenticationDetails(): Promise<AuthenticationDetails> { return Promise.resolve({ key: null, source: null, gcpToken: null, gcpProject: null, maxRetries: 1 }); }
-    buildTargetUrl(ctx: StrategyContext): URL {
+    override getAuthenticationDetails(): Promise<AuthenticationDetails> { return Promise.resolve({ key: null, source: null, gcpToken: null, gcpProject: null, maxRetries: 1 }); }
+    override buildTargetUrl(ctx: StrategyContext): URL {
         if (!ctx.prefix || !this.config.apiMappings[ctx.prefix]) throw new Response(`Proxy target for prefix '${ctx.prefix}' not in API_MAPPINGS.`, { status: 503 });
         const url = new URL(ctx.path, this.config.apiMappings[ctx.prefix]);
         ctx.originalUrl.searchParams.forEach((v, k) => url.searchParams.set(k, v));
         return url;
     }
-    buildRequestHeaders(ctx: StrategyContext, _auth: AuthenticationDetails) { return buildBaseProxyHeaders(ctx.originalRequest.headers); }
-    // No transformation needed for the request body
+    override buildRequestHeaders(ctx: StrategyContext, _auth: AuthenticationDetails) { return buildBaseProxyHeaders(ctx.originalRequest.headers); }
 }
