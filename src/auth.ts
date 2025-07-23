@@ -84,49 +84,61 @@ const getApiKeyForRequest = (userKey: string | null, model: string | null): ApiK
  * @returns 返回认证详情对象
  */
 export const _getGeminiAuthDetails = (c: Context, ctx: StrategyContext, model: string | null, attempt: number, name: string): AuthenticationDetails => {
-            const config = configManager.getSync();
-            const userApiKey = getApiKeyFromReq(c, ctx.originalUrl);
-            const isTriggerKey = userApiKey ? config.triggerKeys.has(userApiKey) : false;
+    const config = configManager.getSync();
+    const userApiKey = getApiKeyFromReq(c, ctx.originalUrl);
+    const isTriggerKey = userApiKey ? config.triggerKeys.has(userApiKey) : false;
 
-            // 1. 如果是真实密钥用户，直接使用他们的密钥，不进行任何拦截。
-            if (userApiKey && !isTriggerKey) {
-                return { key: userApiKey, source: 'user', gcpToken: null, gcpProject: null, maxRetries: 1 };
+    // --- 1. 优先处理所有有状态请求 ---
+    if (isStatefulRequest(ctx)) {
+        if (isTriggerKey) {
+            // 对于触发密钥发起的有状态请求，必须使用备用密钥
+            if (config.fallbackKey) {
+                return { key: config.fallbackKey, source: 'fallback', gcpToken: null, gcpProject: null, maxRetries: 1 };
+            } else {
+                throw new Response(`Stateful request with Trigger Key cannot be processed: No fallbackKey configured.`, { status: 503 });
             }
+        } else if (userApiKey) {
+            // 对于非触发密钥发起的有状态请求，始终使用其自己的密钥
+            return { key: userApiKey, source: 'user', gcpToken: null, gcpProject: null, maxRetries: 1 };
+        } else {
+            // 拒绝无密钥的有状态请求
+            throw new Response(`Stateful requests require an API key.`, { status: 401 });
+        }
+    }
 
-            // 2. 如果是触发密钥用户，则根据请求是否有状态来决定策略。
-            if (isTriggerKey && isStatefulRequest(ctx)) {
-                if (config.fallbackKey) {
-                    // 对于有状态请求，强制使用备用密钥，不进行重试。
-                    return { key: config.fallbackKey, source: 'fallback', gcpToken: null, gcpProject: null, maxRetries: 1 };
-                } else {
-                    // 如果没有配置备用密钥，则无法处理有状态请求。
-                    throw new Response(`Stateful request with Trigger Key cannot be processed: No fallbackKey configured.`, { status: 503 });
-                }
-            }
+    // --- 2. 处理所有无状态请求 ---
+    
+    // a) 如果是非触发密钥，直接使用
+    if (userApiKey && !isTriggerKey) {
+        return { key: userApiKey, source: 'user', gcpToken: null, gcpProject: null, maxRetries: 1 };
+    }
 
-            // 3. 对于触发密钥的无状态请求（或没有提供密钥的请求），执行现有的轮询和重试逻辑。
-            const isModels = ctx.path.endsWith('/models');
-            let result: ApiKeyResult | null = null;
-        
-            if (attempt === 1) {
-                result = getApiKeyForRequest(userApiKey, model);
-                if (!result && !isModels) throw new Response(`No valid API key (${name})`, { status: 401 });
-            } else if (isTriggerKey) { // 重试只对触发密钥有效
-                const poolKey = poolKeySelector.next();
-                if (poolKey) {
-                    result = { key: poolKey, source: 'pool' };
-                } else if (!isModels) {
-                    throw new Response(`Key pool exhausted (${name})`, { status: 503 });
-                }
-            } else if (attempt > 1 && !isModels) {
-                throw new Response(`Request failed, non-trigger key won't be retried (${name})`, { status: 503 });
-            }
-        
-            return {
-                key: result?.key || null,
-                source: result?.source || null,
-                gcpToken: null,
-                gcpProject: null,
-                maxRetries: result?.source === 'pool' ? config.apiRetryLimit : 1
-            };
-        };
+    // b) 如果是触发密钥或无密钥的无状态请求，执行轮询和重试逻辑
+    const isModels = ctx.path.endsWith('/models');
+    let result: ApiKeyResult | null = null;
+
+    if (attempt === 1) {
+        // 首次尝试：根据模型决定使用备用密钥还是池密钥
+        result = getApiKeyForRequest(userApiKey, model);
+        if (!result && !isModels) throw new Response(`No valid API key (${name})`, { status: 401 });
+    } else if (isTriggerKey) {
+        // 重试时（仅对触发密钥有效）：总是从池中获取
+        const poolKey = poolKeySelector.next();
+        if (poolKey) {
+            result = { key: poolKey, source: 'pool' };
+        } else if (!isModels) {
+            throw new Response(`Key pool exhausted (${name})`, { status: 503 });
+        }
+    } else if (attempt > 1 && !isModels) {
+        // 非触发密钥不应进入重试逻辑，但作为保险措施
+        throw new Response(`Request failed, non-trigger key won't be retried (${name})`, { status: 503 });
+    }
+
+    return {
+        key: result?.key || null,
+        source: result?.source || null,
+        gcpToken: null,
+        gcpProject: null,
+        maxRetries: result?.source === 'pool' ? config.apiRetryLimit : 1
+    };
+};
