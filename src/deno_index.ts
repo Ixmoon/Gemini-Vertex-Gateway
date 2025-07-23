@@ -182,7 +182,7 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
                 }
                 
                 const finalContext: StrategyContext = { ...context, parsedBody: transformedBody };
-                return strategy.handleResponse ? await strategy.handleResponse(res, finalContext) : res;
+                return strategy.handleResponse ? await strategy.handleResponse(res, finalContext, auth) : res;
 
             } catch (error) {
                 if (error instanceof Response) {

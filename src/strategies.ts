@@ -151,7 +151,7 @@ abstract class BaseStrategy implements RequestHandlerStrategy {
         return body;
     }
 
-    handleResponse?(res: Response, _ctx: StrategyContext): Promise<Response> {
+    handleResponse?(res: Response, _ctx: StrategyContext, _auth: AuthenticationDetails): Promise<Response> {
         return Promise.resolve(res);
     }
 
@@ -296,7 +296,7 @@ export class GeminiOpenAIStrategy extends BaseStrategy {
         return headers;
     }
 
-    override async handleResponse(res: Response, ctx: StrategyContext): Promise<Response> {
+    override async handleResponse(res: Response, ctx: StrategyContext, _auth: AuthenticationDetails): Promise<Response> {
         if (!ctx.path.endsWith('/models') || !res.headers.get("content-type")?.includes("json")) return res;
         try {
             const body = await res.json();
@@ -363,7 +363,7 @@ export class GeminiNativeStrategy extends BaseStrategy {
         }
         return h;
     }
-    override async handleResponse(res: Response, ctx: StrategyContext): Promise<Response> {
+    override async handleResponse(res: Response, ctx: StrategyContext, auth: AuthenticationDetails): Promise<Response> {
         const uploadUrlHeader = res.headers.get('x-goog-upload-url');
 
         if (uploadUrlHeader) {
@@ -374,10 +374,9 @@ export class GeminiNativeStrategy extends BaseStrategy {
                 proxyUrl.pathname = `${ctx.prefix}${googleUploadUrl.pathname}`;
                 proxyUrl.search = googleUploadUrl.search;
 
-                // 将 API 密钥嵌入重写后的 URL，以便后续的 PUT 请求能够被认证。
-                const userApiKey = getApiKeyFromReq({ req: { header: (name: string) => ctx.originalRequest.headers.get(name) } } as Context, ctx.originalUrl);
-                if (userApiKey) {
-                    proxyUrl.searchParams.set('key', userApiKey);
+                // 使用已经确定的认证密钥，而不是重新解析
+                if (auth.key) {
+                    proxyUrl.searchParams.set('key', auth.key);
                 }
 
                 const newHeaders = new Headers(res.headers);
