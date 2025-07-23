@@ -11,6 +11,7 @@
 // 3. **职责单一**: 每个策略只负责认证、URL构建、头信息处理和必要的请求/响应转换。
 
 import type { Context } from "hono";
+import { configManager } from "./managers.ts";
 import type { AppConfig } from "./managers.ts";
 import type { AuthenticationDetails, RequestHandlerStrategy, StrategyContext } from "./types.ts";
 import { getApiKeyFromReq, buildBaseProxyHeaders, _getGeminiAuthDetails } from "./auth.ts";
@@ -151,39 +152,42 @@ abstract class BaseStrategy implements RequestHandlerStrategy {
         };
     }
     
-    async prepareRequestBody(req: Request, c: Context, ctx: StrategyContext) {
+    async prepareRequestBody(req: Request, c: Context) {
         if (!req.body) {
-            return {
-                bodyForFirstAttempt: null,
-                getCachedBodyForRetry: () => Promise.resolve(null),
-                parsedBodyPromise: Promise.resolve(null),
-                retriesEnabled: false
-            };
+            return { bodyForFirstAttempt: null, getCachedBodyForRetry: () => Promise.resolve(null), parsedBodyPromise: Promise.resolve(null), retriesEnabled: false };
         }
-        
-        // 关键决策：只有当请求可能需要重试时（即使用触发密钥），才考虑缓冲。
+
+        // 关键优化：只有在可能需要重试时（即使用触发密钥时），才考虑缓冲请求体。
+        // 这样可以防止在使用真实密钥时，因不必要的缓冲尝试而导致大文件上传失败。
         const config = configManager.getSync();
-        const userApiKey = getApiKeyFromReq(c, ctx.originalUrl);
+        const userApiKey = getApiKeyFromReq(c, new URL(c.req.url));
         const isTriggerKey = userApiKey ? config.triggerKeys.has(userApiKey) : false;
 
-        if (isTriggerKey) {
-            const contentLengthStr = req.headers.get('content-length');
-            const transferEncoding = req.headers.get('transfer-encoding');
+        // 如果用户使用自己的真实密钥，则绝不进行缓冲，始终以流式方式处理。
+        if (userApiKey && !isTriggerKey) {
+            return {
+                bodyForFirstAttempt: req.body,
+                getCachedBodyForRetry: () => Promise.resolve(null),
+                parsedBodyPromise: Promise.resolve(null), // 不解析，因为不需要
+                retriesEnabled: false,
+            };
+        }
 
-            if (contentLengthStr) {
-                const contentLength = parseInt(contentLengthStr, 10);
-                if (contentLength > 0 && contentLength < MAX_BUFFER_SIZE_BYTES) {
-                    return this._bufferStreamInBackground(req);
-                } else {
-                    console.warn(`Trigger Key Request with body size (${contentLength} bytes) is out of bufferable range. Retries disabled.`);
-                }
-            } else if (transferEncoding?.includes('chunked')) {
-                console.warn(`Trigger Key Request with chunked encoding. Attempting to buffer for retries.`);
+        // 对于触发密钥或无密钥的请求，应用现有的缓冲逻辑。
+        const contentLengthStr = req.headers.get('content-length');
+        const transferEncoding = req.headers.get('transfer-encoding');
+
+        if (contentLengthStr) {
+            const contentLength = parseInt(contentLengthStr, 10);
+            if (contentLength > 0 && contentLength < MAX_BUFFER_SIZE_BYTES) {
                 return this._bufferStreamInBackground(req);
             }
+            console.warn(`Request body size (${contentLength} bytes) is out of bufferable range. Retries disabled.`);
+        } else if (transferEncoding?.includes('chunked')) {
+            console.warn(`Request with chunked encoding. Attempting to buffer for retries. Buffering will fail if body exceeds ${MAX_BUFFER_SIZE_BYTES} bytes.`);
+            return this._bufferStreamInBackground(req);
         }
         
-        // 对于非触发密钥的请求（或任何不满足缓冲条件的请求），直接流式传输，不进行缓冲。
         return {
             bodyForFirstAttempt: req.body,
             getCachedBodyForRetry: () => Promise.resolve(null),
