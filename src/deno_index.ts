@@ -122,14 +122,18 @@ const handleWebSocketProxy = async (c: Context): Promise<Response> => {
 
         const closeHandler = (event: CloseEvent) => {
             console.log(`WebSocket closed: ${event.code} ${event.reason}`);
-            if (clientSocket.readyState !== WebSocket.CLOSED) clientSocket.close(event.code, event.reason);
-            if (googleSocket.readyState !== WebSocket.CLOSED) googleSocket.close(event.code, event.reason);
+            // 确保我们使用一个有效的关闭码。如果上游关闭码无效，则使用 1000。
+            const code = (event.code === 1000 || (event.code >= 3000 && event.code <= 4999)) ? event.code : 1000;
+            if (clientSocket.readyState !== WebSocket.CLOSED) clientSocket.close(code, event.reason);
+            if (googleSocket.readyState !== WebSocket.CLOSED) googleSocket.close(code, event.reason);
         };
         const errorHandler = (event: Event) => {
             console.error("WebSocket error:", event);
             const reason = event instanceof ErrorEvent ? event.message : "Unknown error";
-            if (clientSocket.readyState < WebSocket.CLOSING) clientSocket.close(1011, reason);
-            if (googleSocket.readyState < WebSocket.CLOSING) googleSocket.close(1011, reason);
+            // 总是使用 1000 (Normal Closure) 或 1011 (Server Error) 等来关闭，但发起关闭时不能用 1011
+            // 因此，我们使用一个通用的错误代码 1000。
+            if (clientSocket.readyState < WebSocket.CLOSING) clientSocket.close(1000, reason);
+            if (googleSocket.readyState < WebSocket.CLOSING) googleSocket.close(1000, reason);
         };
 
         clientSocket.onclose = closeHandler;
