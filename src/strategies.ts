@@ -174,25 +174,9 @@ abstract class BaseStrategy implements RequestHandlerStrategy {
             };
         }
 
-        // 对于触发密钥或无密钥的请求，应用现有的缓冲逻辑。
-        const contentLengthStr = req.headers.get('content-length');
-        const transferEncoding = req.headers.get('transfer-encoding');
-
-        if (contentLengthStr) {
-            const contentLength = parseInt(contentLengthStr, 10);
-            if (contentLength > 0 && contentLength < MAX_BUFFER_SIZE_BYTES) {
-                return this._bufferStreamInBackground(req);
-            }
-        } else if (transferEncoding?.includes('chunked')) {
-            return this._bufferStreamInBackground(req);
-        }
-        
-        return {
-            bodyForFirstAttempt: req.body,
-            getCachedBodyForRetry: () => Promise.resolve(null),
-            parsedBodyPromise: Promise.resolve(null),
-            retriesEnabled: false,
-        };
+        // 对于触发密钥或无密钥的请求，我们默认它们都应该被考虑重试。
+        // 后台缓存机制自身包含了 100MB 的大小安全检查。
+        return this._bufferStreamInBackground(req);
     }
 
     transformRequestBody?(body: Record<string, any> | null, _ctx: StrategyContext): Record<string, any> | null {
