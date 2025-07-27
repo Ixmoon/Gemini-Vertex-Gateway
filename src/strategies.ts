@@ -135,7 +135,7 @@ abstract class BaseStrategy implements RequestHandlerStrategy {
 
         const parsedBodyPromise = (async () => {
             const buffer = await cachePromise;
-            if (buffer && req.headers.get('content-type')?.includes('application/json')) {
+            if (buffer && buffer.byteLength > 0 && req.headers.get('content-type')?.includes('application/json')) {
                 try {
                     return JSON.parse(new TextDecoder().decode(buffer));
                 } catch (e) {
