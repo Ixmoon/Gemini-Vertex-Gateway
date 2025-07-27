@@ -43,14 +43,9 @@ const _proxyWebSocket = (client: WebSocket, backend: WebSocket) => {
         client.onerror = backend.onerror = null;
         client.onclose = backend.onclose = null;
         
-        // 根据 WebSocket 规范验证关闭代码。
-        // 无效代码（如 1005, 1006, 1015）不能被程序化地设置。
-        // 我们将它们映射到一个通用的“代理关闭”代码。
-        const validCode = (code === 1000 || (code >= 3000 && code <= 4999)) ? code : 1000;
-
         // 如果连接尚未关闭，则使用提供的代码和原因关闭它
-        if (client.readyState < WebSocket.CLOSING) client.close(validCode, reason);
-        if (backend.readyState < WebSocket.CLOSING) backend.close(validCode, reason);
+        if (client.readyState < WebSocket.CLOSING) client.close(code, reason);
+        if (backend.readyState < WebSocket.CLOSING) backend.close(code, reason);
     };
 
     client.onmessage = (event) => {
@@ -140,7 +135,7 @@ abstract class BaseStrategy implements RequestHandlerStrategy {
 
         const parsedBodyPromise = (async () => {
             const buffer = await cachePromise;
-            if (buffer && buffer.byteLength > 0 && req.headers.get('content-type')?.includes('application/json')) {
+            if (buffer && req.headers.get('content-type')?.includes('application/json')) {
                 try {
                     return JSON.parse(new TextDecoder().decode(buffer));
                 } catch (e) {
