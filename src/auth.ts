@@ -35,16 +35,11 @@ export const isStatefulRequest = (ctx: StrategyContext): boolean => {
     if (ctx.isWebSocket) return true;
 
     // 检查路径中是否包含有状态的 API 端点名称，忽略版本号
-    const statefulEndpoints = ['/files', '/tunedModels', '/operations', '/corpora', '/batches', '/cachedContents'];
+    const statefulEndpoints = ['/files', '/tunedModels', '/operations', '/corpora', '/batches'];
     if (statefulEndpoints.some(p => ctx.path.includes(p))) return true;
 
-    // 检查 generateContent 请求体中是否引用了 fileData
-    if (ctx.parsedBody?.contents?.some((c: any) => c.parts?.some((p: any) => 'fileData' in p))) {
-        return true;
-    }
-
-    // 检查 generateContent 请求体中是否引用了 cachedContent
-    if (ctx.parsedBody?.cachedContent) {
+    // 检查 generateContent 请求体中是否引用了 fileData 或 file_data
+    if (ctx.parsedBody?.contents?.some((c: any) => c.parts?.some((p: any) => 'fileData' in p || 'file_data' in p))) {
         return true;
     }
 
