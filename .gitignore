@@ -5,3 +5,4 @@ secrets.config.json
 src/config_data.ts
 key_tester_gui_config.json
 key_tester.exe
+KeyTester.exe

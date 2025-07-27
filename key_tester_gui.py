@@ -1,12 +1,12 @@
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+from tkinter import ttk, scrolledtext, messagebox
 import json
-import re
-import threading
-from concurrent.futures import ThreadPoolExecutor
-from google import genai
-from google.genai import types
-import platform
+from re import split
+import asyncio
+from threading import Thread
+from google.genai import Client
+from google.genai.types import HttpOptions
+from platform import system as platformsystem
 from collections import Counter
 
 class ElegantGeminiKeyChecker:
@@ -17,22 +17,24 @@ class ElegantGeminiKeyChecker:
         self.root.minsize(650, 450)
         self.root.configure(bg="#FAFAFA")
         self.config_path = 'key_tester_gui_config.json'
+        self.SECRETS_CONFIG_PATH = 'secrets.config.json'
+        self.max_workers_var = tk.IntVar(value=50)
+        self.pending_ui_updates = []
+        self.ui_update_scheduled = False
 
         self.setup_styles()
         self.create_widgets()
-        self.load_gui_config() # Load URL on startup
+        self.load_gui_config()
         self.center_window()
-        self.executor = ThreadPoolExecutor(max_workers=50) # 设置线程池
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def setup_styles(self):
         style = ttk.Style()
-        if platform.system() == "Windows":
+        if platformsystem() == "Windows":
             style.theme_use('vista')
         else:
             style.theme_use('clam')
 
-        # --- Professional Color Palette ---
         self.colors = {
             "bg": "#FAFAFA",
             "bg_secondary": "#FFFFFF",
@@ -48,78 +50,38 @@ class ElegantGeminiKeyChecker:
             "border_focus": "#007BFF",
         }
 
-        # --- General Styles ---
-        font_family = 'Microsoft YaHei UI' if platform.system() == "Windows" else 'Helvetica'
-        style.configure(".",
-                        background=self.colors["bg"],
-                        foreground=self.colors["fg"],
-                        font=(font_family, 10))
-
+        font_family = 'Microsoft YaHei UI' if platformsystem() == "Windows" else 'Helvetica'
+        style.configure(".", background=self.colors["bg"], foreground=self.colors["fg"], font=(font_family, 10))
         style.configure("TFrame", background=self.colors["bg"])
         style.configure("TLabel", background=self.colors["bg"], foreground=self.colors["fg"])
-        
-        # --- Paned Window Style ---
         style.configure("TPanedwindow", background=self.colors["border"])
         style.configure("TPanedwindow.Sash", sashthickness=6, relief="flat", background=self.colors["bg"])
-
-        # --- Button Styles ---
-        style.configure("TButton",
-                        padding=(12, 6),
-                        relief="flat",
-                        background=self.colors["bg_secondary"],
-                        foreground=self.colors["fg"],
-                        borderwidth=1,
-                        bordercolor=self.colors["border"],
+        style.configure("TButton", padding=(12, 6), relief="flat", background=self.colors["bg_secondary"],
+                        foreground=self.colors["fg"], borderwidth=1, bordercolor=self.colors["border"],
                         font=(font_family, 10))
-        style.map("TButton",
-                  background=[('active', '#F0F0F0')],
-                  bordercolor=[('active', self.colors["border_focus"])])
-
-        style.configure("Accent.TButton",
-                        background=self.colors["accent"],
-                        foreground=self.colors["fg"]) # 强制设为黑色
-        style.map("Accent.TButton",
-                  background=[('active', self.colors["accent_active"]), ('disabled', '#E0E0E0')])
-
-        # --- Treeview Styles ---
-        style.configure("Treeview",
-                        background=self.colors["bg_secondary"],
-                        foreground=self.colors["fg"],
-                        fieldbackground=self.colors["bg_secondary"],
-                        rowheight=30,
-                        relief="solid",
-                        borderwidth=1,
-                        bordercolor=self.colors["border"])
-        style.configure("Treeview.Heading",
-                        background=self.colors["bg"],
-                        foreground=self.colors["fg"],
-                        relief="flat",
-                        font=(font_family, 10, 'bold'),
-                        padding=(12, 8))
+        style.map("TButton", background=[('active', '#F0F0F0')], bordercolor=[('active', self.colors["border_focus"])])
+        style.configure("Accent.TButton", background=self.colors["accent"], foreground=self.colors["fg"])
+        style.map("Accent.TButton", background=[('active', self.colors["accent_active"]), ('disabled', '#E0E0E0')])
+        style.configure("Treeview", background=self.colors["bg_secondary"], foreground=self.colors["fg"],
+                        fieldbackground=self.colors["bg_secondary"], rowheight=30, relief="solid",
+                        borderwidth=1, bordercolor=self.colors["border"])
+        style.configure("Treeview.Heading", background=self.colors["bg"], foreground=self.colors["fg"],
+                        relief="flat", font=(font_family, 10, 'bold'), padding=(12, 8))
         style.map("Treeview.Heading", background=[('active', self.colors["bg"])])
-        style.map("Treeview",
-                  background=[('selected', self.colors["accent"])],
+        style.map("Treeview", background=[('selected', self.colors["accent"])],
                   foreground=[('selected', self.colors["accent_fg"])])
-
-        # --- Scrollbar Style ---
-        style.configure("Vertical.TScrollbar",
-                        relief="flat",
-                        background=self.colors["bg"],
-                        troughcolor=self.colors["bg"],
-                        bordercolor=self.colors["bg"],
+        style.configure("Vertical.TScrollbar", relief="flat", background=self.colors["bg"],
+                        troughcolor=self.colors["bg"], bordercolor=self.colors["bg"],
                         arrowcolor=self.colors["fg_subtle"])
         style.map("Vertical.TScrollbar", background=[('active', '#E0E0E0')])
 
     def create_widgets(self):
-        # --- Main Layout ---
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         
-        # PanedWindow for resizable sections
         paned_window = ttk.PanedWindow(self.root, orient=tk.VERTICAL, style="TPanedwindow")
         paned_window.grid(row=0, column=0, sticky="nsew", padx=15, pady=(15, 10))
 
-        # --- Top Frame (Input) ---
         input_container = ttk.Frame(paned_window, padding=(15, 15, 15, 0))
         input_container.columnconfigure(0, weight=1)
         input_container.rowconfigure(1, weight=1)
@@ -129,10 +91,8 @@ class ElegantGeminiKeyChecker:
         
         self.keys_input = scrolledtext.ScrolledText(input_container, wrap=tk.WORD,
                                                     bg=self.colors["bg_secondary"], fg=self.colors["fg"],
-                                                    relief=tk.SOLID, borderwidth=1,
-                                                    bd=0, # Use highlightthickness instead
-                                                    highlightthickness=1,
-                                                    highlightcolor=self.colors["border"],
+                                                    relief=tk.SOLID, borderwidth=1, bd=0,
+                                                    highlightthickness=1, highlightcolor=self.colors["border"],
                                                     highlightbackground=self.colors["border"],
                                                     insertbackground=self.colors["fg"],
                                                     selectbackground=self.colors["accent"],
@@ -141,18 +101,29 @@ class ElegantGeminiKeyChecker:
         self.keys_input.bind("<FocusIn>", lambda e: self.keys_input.config(highlightcolor=self.colors["border_focus"]))
         self.keys_input.bind("<FocusOut>", lambda e: self.keys_input.config(highlightcolor=self.colors["border"]))
 
-        # --- API Endpoint Input ---
-        endpoint_label = ttk.Label(input_container, text="自定义 API 端点 (可选):")
-        endpoint_label.grid(row=2, column=0, sticky="w", pady=(10, 5))
+        options_frame = ttk.Frame(input_container)
+        options_frame.grid(row=2, column=0, sticky="ew", pady=(10, 5))
+        options_frame.columnconfigure(1, weight=1)
 
+        endpoint_label = ttk.Label(options_frame, text="API 端点:")
+        endpoint_label.grid(row=0, column=0, sticky="w")
+        
         self.api_endpoint_var = tk.StringVar()
-        self.endpoint_entry = ttk.Entry(input_container, textvariable=self.api_endpoint_var, font=('Consolas', 10))
-        self.endpoint_entry.grid(row=3, column=0, sticky="ew")
+        self.endpoint_entry = ttk.Entry(options_frame, textvariable=self.api_endpoint_var, font=('Consolas', 10))
+        self.endpoint_entry.grid(row=0, column=1, sticky="ew", padx=5)
         self.api_endpoint_var.set("https://generativelanguage.googleapis.com")
+
+        max_workers_label = ttk.Label(options_frame, text="并发数:")
+        max_workers_label.grid(row=0, column=2, sticky="w", padx=(15, 5))
+
+        self.max_workers_spinbox = ttk.Spinbox(options_frame, from_=1, to=500, textvariable=self.max_workers_var, width=8)
+        self.max_workers_spinbox.grid(row=0, column=3, sticky="w")
+
+        self.status_bar = ttk.Label(options_frame, text="准备就绪", anchor='w', foreground=self.colors["fg_subtle"])
+        self.status_bar.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         
         paned_window.add(input_container, weight=1)
 
-        # --- Bottom Frame (Results) ---
         results_container = ttk.Frame(paned_window, padding=(15, 15, 15, 0))
         results_container.columnconfigure(0, weight=1)
         results_container.rowconfigure(0, weight=1)
@@ -167,7 +138,7 @@ class ElegantGeminiKeyChecker:
         self.tree.column("#", width=50, stretch=False, anchor=tk.W)
         self.tree.column("Key", width=320, anchor=tk.W)
         self.tree.column("Status", width=120, stretch=False, anchor=tk.CENTER)
-        self.tree.column("Details", width=250)
+        self.tree.column("Details", width=400)
 
         vsb = ttk.Scrollbar(results_container, orient="vertical", command=self.tree.yview, style="Vertical.TScrollbar")
         self.tree.configure(yscrollcommand=vsb.set)
@@ -180,100 +151,142 @@ class ElegantGeminiKeyChecker:
         
         paned_window.add(results_container, weight=3)
         
-        # --- Actions & Status Bar Frame ---
         bottom_frame = ttk.Frame(self.root, padding=(15, 5, 15, 10))
         bottom_frame.grid(row=1, column=0, sticky="ew")
         bottom_frame.columnconfigure(1, weight=1)
 
-        self.check_button = ttk.Button(bottom_frame, text="开始验证", command=self.start_checking_thread, style="Accent.TButton")
-        self.check_button.grid(row=0, column=0, sticky="w", padx=(0, 10))
+        self.check_button = ttk.Button(bottom_frame, text="开始验证", command=self.start_checking, style="Accent.TButton")
+        self.check_button.grid(row=0, column=0, sticky="w")
 
-        actions_inner_frame = ttk.Frame(bottom_frame)
-        actions_inner_frame.grid(row=0, column=2, sticky="e")
+        # Action buttons grouped on the right
+        actions_frame = ttk.Frame(bottom_frame)
+        actions_frame.grid(row=0, column=2, sticky="e")
 
-        self.copy_valid_button = ttk.Button(actions_inner_frame, text="复制有效", command=self.copy_valid)
-        self.copy_valid_button.pack(side=tk.LEFT, padx=(0, 10))
+        self.copy_valid_button = ttk.Button(actions_frame, text="复制有效", command=self.copy_valid)
+        self.copy_valid_button.grid(row=0, column=0, padx=(0, 5))
         
-        self.delete_invalid_button = ttk.Button(actions_inner_frame, text="删除无效", command=self.delete_invalid)
-        self.delete_invalid_button.pack(side=tk.LEFT, padx=(0, 10))
+        self.delete_invalid_button = ttk.Button(actions_frame, text="删除无效", command=self.delete_invalid)
+        self.delete_invalid_button.grid(row=0, column=1, padx=(0, 5))
 
-        self.load_button = ttk.Button(actions_inner_frame, text="读取配置", command=self.load_from_config)
-        self.load_button.pack(side=tk.LEFT, padx=(0, 10))
+        self.load_button = ttk.Button(actions_frame, text="读取配置", command=self.load_from_config)
+        self.load_button.grid(row=0, column=2, padx=(0, 5))
 
-        self.save_button = ttk.Button(actions_inner_frame, text="保存到配置", command=self.save_to_config)
-        self.save_button.pack(side=tk.LEFT)
+        self.clear_pool_button = ttk.Button(actions_frame, text="清空密钥池", command=self.clear_key_pool)
+        self.clear_pool_button.grid(row=0, column=3, padx=(0, 5))
+
+        self.save_button = ttk.Button(actions_frame, text="保存到配置", command=self.save_to_config)
+        self.save_button.grid(row=0, column=4, padx=(0, 0))
         
-        self.status_bar = ttk.Label(bottom_frame, text="准备就绪", anchor='w', foreground=self.colors["fg_subtle"])
-        self.status_bar.grid(row=0, column=1, sticky='ew', padx=(10, 10))
-        
-    def start_checking_thread(self):
+    def start_checking(self):
         self.check_button.config(state=tk.DISABLED)
         for i in self.tree.get_children():
             self.tree.delete(i)
 
         keys_text = self.keys_input.get("1.0", tk.END)
-        keys = re.split(r'[\s,]+', keys_text)
+        keys = split(r'[\s,]+', keys_text)
         unique_keys = list(dict.fromkeys(filter(None, keys)))
 
         if not unique_keys:
             messagebox.showwarning("输入错误", "请输入至少一个 API 密钥。")
             self.check_button.config(state=tk.NORMAL)
             return
+        
+        Thread(target=self.run_async_validation, args=(unique_keys,), daemon=True).start()
 
+    def run_async_validation(self, keys):
+        try:
+            asyncio.run(self.validate_all_keys_async(keys))
+        except Exception as e:
+            self.root.after(0, self.handle_validation_error, e)
+
+    def handle_validation_error(self, e):
+        messagebox.showerror("验证出错", f"执行异步验证时发生错误: {e}")
+        self.check_button.config(state=tk.NORMAL)
+
+    async def worker(self, queue, http_options):
+        while True:
+            try:
+                item = await queue.get()
+                await self.validate_key_async(item['key'], http_options, item['id'])
+                queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                # Handle exceptions within the worker if necessary
+                queue.task_done()
+
+
+    async def validate_all_keys_async(self, keys):
         api_endpoint = self.api_endpoint_var.get().strip()
-
-        self.update_status(f"开始验证 {len(unique_keys)} 个密钥...")
+        http_options = HttpOptions(base_url=api_endpoint) if api_endpoint else None
+        max_concurrency = self.max_workers_var.get()
+        
+        self.root.after(0, self.update_status, f"开始验证 {len(keys)} 个密钥 (并发: {max_concurrency})...")
         self.key_statuses = {}
         
-        for i, key in enumerate(unique_keys):
-            item_id = self.tree.insert("", "end", values=(i + 1, key, "验证中...", ""), tags=('checking',))
-            future = self.executor.submit(self.validate_key, key, api_endpoint)
-            future.add_done_callback(
-                lambda f, item=item_id, k=key: self.root.after(0, self.update_ui_from_future, f, item, k)
-            )
+        queue = asyncio.Queue()
+        for i, key in enumerate(keys):
+            item_id = self.tree.insert("", "end", values=(i + 1, key, "排队中...", ""), tags=('checking',))
+            await queue.put({'id': item_id, 'key': key})
 
-    def validate_key(self, key, api_endpoint):
-        """
-        验证单个密钥，不再接收 item_id，而是返回结果。
-        返回: (status, details, tag)
-        """
+        workers = [asyncio.create_task(self.worker(queue, http_options)) for _ in range(max_concurrency)]
+
+        await queue.join()
+
+        for w in workers:
+            w.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+
+
+    async def validate_key_async(self, key, http_options, item_id):
+        status, details, tag = "错误", "未知错误", "invalid"
+        client = None
         try:
-            http_options = types.HttpOptions(base_url=api_endpoint) if api_endpoint else None
-            client = genai.Client(api_key=key, http_options=http_options)
-            client.models.get(model="models/gemini-2.0-flash")
-            return "有效", "密钥有效，可访问模型。", "valid"
+            client = Client(api_key=key, http_options=http_options)
+            await client.aio.models.get(model="models/gemini-2.0-flash")
+            status, details, tag = "有效", "密钥有效", "valid"
         except Exception as e:
             error_str = str(e).lower()
-            if "permission denied" in error_str:
-                return "无效", "权限被拒绝。请检查密钥权限。", "invalid"
-            elif "api key not valid" in error_str or "unauthenticated" in error_str:
-                return "无效", "认证失败。API 密钥不正确。", "invalid"
+            if "permission denied" in error_str or "api key not valid" in error_str or "unauthenticated" in error_str:
+                status, details, tag = "无效", f"认证失败: {repr(e)}", "invalid"
+            elif "not found" in error_str:
+                status, details, tag = "无效", f"模型或端点未找到: {repr(e)}", "invalid"
             else:
-                return "错误", str(e), "invalid"
-
-    def update_ui_from_future(self, future, item_id, key):
-        """
-        从 future 对象获取结果并更新UI。
-        """
-        try:
-            # 从 future 对象获取 validate_key 的返回结果
-            status, details, tag = future.result()
-
+                status, details, tag = "无效", repr(e), "invalid"
+        finally:
             self.key_statuses[key] = tag
+            self.root.after(0, self.schedule_ui_update, item_id, key, status, details, tag)
 
-            # 更新 Treeview 中的条目
-            values = list(self.tree.item(item_id, "values"))
-            self.tree.item(item_id, values=(values[0], key, status, details), tags=(tag,))
+    def schedule_ui_update(self, item_id, key, status, details, tag):
+        self.pending_ui_updates.append((item_id, key, status, details, tag))
+        if not self.ui_update_scheduled:
+            self.ui_update_scheduled = True
+            self.root.after(100, self.process_pending_updates)
 
-            self.update_status_summary()
-        except tk.TclError:
-            # Item might have been deleted, just ignore
-            pass
-        except Exception as e:
-            # Handle potential exceptions from the future (e.g., network errors)
-            self.tree.item(item_id, values=(self.tree.item(item_id, "values")[0], key, "执行错误", str(e)), tags=('invalid',))
-            self.key_statuses[key] = 'invalid'
-            self.update_status_summary()
+    def process_pending_updates(self):
+        self.ui_update_scheduled = False
+        if not self.pending_ui_updates:
+            return
+
+        updates_to_process = self.pending_ui_updates[:]
+        self.pending_ui_updates.clear()
+
+        latest_updates = {}
+        for item_id, key, status, details, tag in updates_to_process:
+            latest_updates[item_id] = (key, status, details, tag)
+
+        for item_id, (key, status, details, tag) in latest_updates.items():
+            try:
+                if self.tree.exists(item_id):
+                    values = list(self.tree.item(item_id, "values"))
+                    self.tree.item(item_id, values=(values[0], key, status, details), tags=(tag,))
+            except tk.TclError:
+                pass
+            except Exception as e:
+                if self.tree.exists(item_id):
+                    self.tree.item(item_id, values=(self.tree.item(item_id, "values")[0], key, "UI更新错误", str(e)), tags=('invalid',))
+
+        self.update_status_summary()
 
     def update_status_summary(self):
         counts = Counter(self.key_statuses.values())
@@ -285,7 +298,6 @@ class ElegantGeminiKeyChecker:
         if total == (valid_count + invalid_count) and total > 0:
              self.check_button.config(state=tk.NORMAL)
              summary_text += " | 验证完成"
-
         self.update_status(summary_text)
 
     def delete_invalid(self):
@@ -300,7 +312,7 @@ class ElegantGeminiKeyChecker:
             self.update_status(f"删除了 {len(items_to_delete)} 个密钥。")
 
     def copy_valid(self):
-        valid_keys = [self.tree.item(item_id, "values")[1] for item_id in self.tree.get_children() if 'valid' in self.tree.item(item_id, "tags")]
+        valid_keys = self._get_valid_keys()
         if not valid_keys:
             messagebox.showwarning("无有效密钥", "没有可复制的有效密钥。")
             return
@@ -310,93 +322,108 @@ class ElegantGeminiKeyChecker:
         self.root.clipboard_append(keys_string)
         self.update_status(f"已复制 {len(valid_keys)} 个有效密钥到剪贴板。")
 
+    def _get_valid_keys(self):
+        return [self.tree.item(item_id, "values")[1] for item_id in self.tree.get_children() if 'valid' in self.tree.item(item_id, "tags")]
+
     def save_to_config(self):
-        valid_keys = [self.tree.item(item_id, "values")[1] for item_id in self.tree.get_children() if 'valid' in self.tree.item(item_id, "tags")]
+        valid_keys = self._get_valid_keys()
         if not valid_keys:
             messagebox.showwarning("没有密钥", "没有可保存的有效密钥。")
             return
 
-        secrets_config_path = 'secrets.config.json'
-        try:
-            try:
-                with open(secrets_config_path, 'r', encoding='utf-8') as f:
-                    config_data = json.load(f)
-            except FileNotFoundError:
-                config_data = {"poolKeys": []}
-            except json.JSONDecodeError:
-                messagebox.showerror("错误", f"无法解析 {secrets_config_path}，请检查文件格式。")
-                return
-            
-            if 'poolKeys' not in config_data or not isinstance(config_data['poolKeys'], list):
-                config_data['poolKeys'] = []
+        config_data = self._read_json_config(self.SECRETS_CONFIG_PATH, default={"poolKeys": []})
+        if config_data is None: return
 
-            existing_keys = set(config_data['poolKeys'])
-            new_keys_to_add = [key for key in valid_keys if key not in existing_keys]
-            config_data['poolKeys'].extend(new_keys_to_add)
+        if 'poolKeys' not in config_data or not isinstance(config_data.get('poolKeys'), list):
+            config_data['poolKeys'] = []
 
-            with open(secrets_config_path, 'w', encoding='utf-8') as f:
-                json.dump(config_data, f, indent=2, ensure_ascii=False)
-            
-            messagebox.showinfo("成功", f"已成功将 {len(new_keys_to_add)} 个新密钥添加到 {secrets_config_path}。")
-            self.update_status(f"已添加 {len(new_keys_to_add)} 个新密钥到 {secrets_config_path}。")
+        existing_keys = set(config_data['poolKeys'])
+        new_keys_to_add = [key for key in valid_keys if key not in existing_keys]
+        config_data['poolKeys'].extend(new_keys_to_add)
 
-        except Exception as e:
-            messagebox.showerror("保存错误", f"写入 {secrets_config_path} 失败: {e}")
-            self.update_status(f"保存失败: {e}")
+        if self._write_json_config(self.SECRETS_CONFIG_PATH, config_data):
+            messagebox.showinfo("成功", f"已成功将 {len(new_keys_to_add)} 个新密钥添加到 {self.SECRETS_CONFIG_PATH}。")
+            self.update_status(f"已添加 {len(new_keys_to_add)} 个新密钥到 {self.SECRETS_CONFIG_PATH}。")
 
     def load_from_config(self):
-        secrets_config_path = 'secrets.config.json'
-        try:
-            with open(secrets_config_path, 'r', encoding='utf-8') as f:
-                config_data = json.load(f)
-            
-            pool_keys = config_data.get('poolKeys', [])
-            if not isinstance(pool_keys, list):
-                 messagebox.showwarning("格式错误", f"{secrets_config_path} 中的 'poolKeys' 不是一个列表。")
-                 return
+        config_data = self._read_json_config(self.SECRETS_CONFIG_PATH)
+        if config_data is None: return
 
-            if not pool_keys:
-                messagebox.showinfo("提示", f"{secrets_config_path} 中的密钥池为空。")
-                return
+        pool_keys = config_data.get('poolKeys', [])
+        if not isinstance(pool_keys, list):
+             messagebox.showwarning("格式错误", f"{self.SECRETS_CONFIG_PATH} 中的 'poolKeys' 不是一个列表。")
+             return
 
-            self.keys_input.delete('1.0', tk.END)
-            self.keys_input.insert('1.0', "\n".join(pool_keys))
-            self.update_status(f"已从 {secrets_config_path} 加载 {len(pool_keys)} 个密钥。")
+        if not pool_keys:
+            messagebox.showinfo("提示", f"{self.SECRETS_CONFIG_PATH} 中的密钥池为空。")
+            return
 
-        except FileNotFoundError:
-            messagebox.showerror("错误", f"配置文件 {secrets_config_path} 未找到。")
-        except json.JSONDecodeError:
-            messagebox.showerror("错误", f"无法解析 {secrets_config_path}。")
-        except Exception as e:
-            messagebox.showerror("读取错误", f"读取 {secrets_config_path} 失败: {e}")
+        self.keys_input.delete('1.0', tk.END)
+        self.keys_input.insert('1.0', "\n".join(pool_keys))
+        self.update_status(f"已从 {self.SECRETS_CONFIG_PATH} 加载 {len(pool_keys)} 个密钥。")
+
+    def clear_key_pool(self):
+        if not messagebox.askyesno("确认清空", f"你确定要清空 {self.SECRETS_CONFIG_PATH} 中的所有密钥吗？\n此操作不可撤销。", icon='warning'):
+            return
+
+        config_data = self._read_json_config(self.SECRETS_CONFIG_PATH, default={})
+        if config_data is None:
+             config_data = {}
+
+        config_data['poolKeys'] = []
+
+        if self._write_json_config(self.SECRETS_CONFIG_PATH, config_data):
+            messagebox.showinfo("成功", f"已成功清空 {self.SECRETS_CONFIG_PATH} 中的密钥池。")
+            self.update_status(f"密钥池 {self.SECRETS_CONFIG_PATH} 已被清空。")
 
     def load_gui_config(self):
-        try:
-            with open(self.config_path, 'r', encoding='utf-8') as f:
-                gui_config = json.load(f)
-            
-            endpoint = gui_config.get("customApiEndpoint")
-            if endpoint and isinstance(endpoint, str):
-                self.api_endpoint_var.set(endpoint)
-                self.update_status("已加载上次使用的自定义端点。")
-        except (FileNotFoundError, json.JSONDecodeError):
-            # It's okay if the config file doesn't exist or is invalid
-            pass
+        gui_config = self._read_json_config(self.config_path)
+        if not gui_config:
+            self.update_status("未找到配置文件，使用默认设置。")
+            return
+
+        endpoint = gui_config.get("customApiEndpoint")
+        if endpoint and isinstance(endpoint, str):
+            self.api_endpoint_var.set(endpoint)
+        
+        max_workers = gui_config.get("maxWorkers", 50)
+        if isinstance(max_workers, int) and 1 <= max_workers <= 500:
+            self.max_workers_var.set(max_workers)
+        
+        self.update_status("已加载配置。")
 
     def save_gui_config(self):
         gui_config = {
-            "customApiEndpoint": self.api_endpoint_var.get().strip()
+            "customApiEndpoint": self.api_endpoint_var.get().strip(),
+            "maxWorkers": self.max_workers_var.get()
         }
+        self._write_json_config(self.config_path, gui_config)
+
+    def _read_json_config(self, path, default=None):
         try:
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                json.dump(gui_config, f, indent=2, ensure_ascii=False)
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return default
+        except json.JSONDecodeError:
+            messagebox.showerror("错误", f"无法解析 {path}，请检查文件格式。")
+            return None
         except Exception as e:
-            # Non-critical error, so we don't show a popup
-            self.update_status(f"保存界面配置失败: {e}")
+            messagebox.showerror("读取错误", f"读取 {path} 失败: {e}")
+            return None
+
+    def _write_json_config(self, path, data):
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            return True
+        except Exception as e:
+            messagebox.showerror("保存错误", f"写入 {path} 失败: {e}")
+            self.update_status(f"保存失败: {e}")
+            return False
 
     def on_closing(self):
         self.save_gui_config()
-        self.executor.shutdown(wait=False, cancel_futures=True)
         self.root.destroy()
 
     def update_status(self, text):
@@ -411,18 +438,10 @@ class ElegantGeminiKeyChecker:
         self.root.geometry(f'{width}x{height}+{x}+{y}')
 
 if __name__ == "__main__":
-    try:
-        from google import genai
-        from google.genai import types
-    except ImportError:
-        messagebox.showerror("缺少依赖", "检测到缺少 'google-genai' 库。\n\n请在终端中使用以下命令安装:\npip install google-genai")
-        genai = None
+    missing_deps = []
 
     root = tk.Tk()
+
     app = ElegantGeminiKeyChecker(root)
 
-    if not genai:
-        app.check_button.config(state=tk.DISABLED)
-        app.update_status("错误: 缺少 'google-genai' 库。请安装后重启。")
-        
     root.mainloop()
