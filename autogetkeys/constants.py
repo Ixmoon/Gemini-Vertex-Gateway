@@ -1,11 +1,10 @@
 # file: autogetkeys/constants.py
 
 # --- Process Status ---
-STATUS_PENDING = "pending"
-STATUS_PROCESSING = "processing"
+STATUS_PENDING = "待处理"
+STATUS_PROCESSING = "处理中"
 STATUS_SUCCESS = "成功"
 STATUS_FAILURE = "失败"
-STATUS_LOGIN_FAILED = "登录失败"
 STATUS_PARTIAL_SUCCESS = "部分成功"
 
 # --- UI Colors ---

@@ -4,13 +4,18 @@ import customtkinter
 from tkinter import filedialog, messagebox
 import threading
 import queue
+import multiprocessing
 import sys
 import os
 import json
 import time
 import logging
 import math
+import signal
+import subprocess
+import concurrent.futures
 from datetime import datetime
+import re
 
 # 确保可以从父目录导入 getkeys
 try:
@@ -28,7 +33,7 @@ except ImportError:
 
 # --- 全局常量 ---
 CONFIG_FILE = "gui_config.json"
-APP_NAME = "Gemini API 密钥获取工具 Pro"
+APP_NAME = "Gemini API 密钥获取工具"
 
 # --- 自定义组件 ---
 class AccountRow(customtkinter.CTkFrame):
@@ -47,10 +52,10 @@ class AccountRow(customtkinter.CTkFrame):
         self.error_label.pack(side="left", padx=(5, 5))
 
         # 绑定双击事件
-        self.bind("<Double-1>", lambda event: on_double_click(self.account_email))
-        self.email_label.bind("<Double-1>", lambda event: on_double_click(self.account_email))
-        self.status_light.bind("<Double-1>", lambda event: on_double_click(self.account_email))
-        self.error_label.bind("<Double-1>", lambda event: on_double_click(self.account_email))
+        self.bind("<Double-1>", lambda _: on_double_click(self.account_email))
+        self.email_label.bind("<Double-1>", lambda _: on_double_click(self.account_email))
+        self.status_light.bind("<Double-1>", lambda _: on_double_click(self.account_email))
+        self.error_label.bind("<Double-1>", lambda _: on_double_click(self.account_email))
 
     def set_status(self, status, error_message=None, key_count=0):
         # 确定灯的颜色
@@ -62,22 +67,21 @@ class AccountRow(customtkinter.CTkFrame):
 
         # 根据状态构建显示文本
         display_text = ""
+        text_color = STATUS_COLORS[STATUS_FAILURE] # 默认是失败的红色
+
         if status == STATUS_SUCCESS:
             display_text = f"获取 {key_count} 个密钥"
-            self.error_label.configure(text=display_text, text_color=STATUS_COLORS[STATUS_SUCCESS])
+            text_color = STATUS_COLORS[STATUS_SUCCESS]
         elif status == STATUS_PARTIAL_SUCCESS:
-            error_line = error_message.splitlines()[0] if error_message else ""
-            # 对于部分成功，如果只是被用户中断，则使用更清晰的表述
-            if "中断" in error_line:
-                 display_text = f"获取 {key_count} 个, {error_line}"
-            else:
-                 display_text = f"获取 {key_count} 个, Err: {error_line}"
-            self.error_label.configure(text=display_text, text_color=STATUS_COLORS[STATUS_FAILURE])
+            # 对于部分成功，总是显示获取的密钥数和原因
+            error_line = error_message.splitlines()[0] if error_message else "部分项目失败"
+            display_text = f"获取 {key_count} 个, {error_line}"
+            text_color = STATUS_COLORS[STATUS_PARTIAL_SUCCESS] # 使用蓝色表示部分成功
         elif error_message:
             display_text = f"{error_message.splitlines()[0]}"
-            self.error_label.configure(text=display_text, text_color=STATUS_COLORS[STATUS_FAILURE])
-        else:
-            self.error_label.configure(text="")
+            # 对于其他失败状态，保持红色
+        
+        self.error_label.configure(text=display_text, text_color=text_color)
 
 class SettingsWindow(customtkinter.CTkToplevel):
     """设置窗口"""
@@ -85,7 +89,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
         super().__init__(master)
         self.grab_set() # 设置为模态窗口，强制用户交互
         self.title("设置")
-        self.geometry("600x300") # 稍微增加高度以获得更好的边距
+        self.geometry("600x420") # 增加高度以容纳新选项
         self.on_save = on_save
 
         # 根本性修复：使用一个主框架来承载所有组件，以确保主题一致性
@@ -127,9 +131,23 @@ class SettingsWindow(customtkinter.CTkToplevel):
         self.keys_entry = customtkinter.CTkEntry(self.main_frame, textvariable=self.keys_var)
         self.keys_entry.grid(row=3, column=1, padx=10, pady=10, sticky="ew")
 
+        # 新增：浏览器窗口大小
+        self.size_label = customtkinter.CTkLabel(self.main_frame, text="浏览器窗口大小 (宽x高):")
+        self.size_label.grid(row=4, column=0, padx=10, pady=10, sticky="w")
+        self.size_var = tkinter.StringVar(value=current_configs.get("window_size", "500x700"))
+        self.size_entry = customtkinter.CTkEntry(self.main_frame, textvariable=self.size_var)
+        self.size_entry.grid(row=4, column=1, padx=10, pady=10, sticky="ew")
+
+        # 新增：浏览器窗口位置
+        self.pos_label = customtkinter.CTkLabel(self.main_frame, text="浏览器窗口位置 (X,Y):")
+        self.pos_label.grid(row=5, column=0, padx=10, pady=10, sticky="w")
+        self.pos_var = tkinter.StringVar(value=current_configs.get("window_position", ""))
+        self.pos_entry = customtkinter.CTkEntry(self.main_frame, placeholder_text="留空则自动平铺", textvariable=self.pos_var)
+        self.pos_entry.grid(row=5, column=1, padx=10, pady=10, sticky="ew")
+
         # 保存按钮 (master更改为 self.main_frame)
         self.save_btn = customtkinter.CTkButton(self.main_frame, text="保存并关闭", command=self.save_and_close)
-        self.save_btn.grid(row=4, column=0, columnspan=3, padx=10, pady=(20, 10))
+        self.save_btn.grid(row=6, column=0, columnspan=3, padx=10, pady=(20, 10))
 
     def browse_browser(self):
         path = filedialog.askopenfilename(title="选择浏览器可执行文件")
@@ -157,7 +175,9 @@ class SettingsWindow(customtkinter.CTkToplevel):
             "browser_path": self.browser_path_var.get(),
             "save_path": self.save_path_var.get(),
             "max_workers": self.workers_var.get(),
-            "desired_keys": self.keys_var.get() or "0"
+            "desired_keys": self.keys_var.get() or "0",
+            "window_size": self.size_var.get(),
+            "window_position": self.pos_var.get()
         }
         self.on_save(new_configs)
         self.destroy()
@@ -174,28 +194,41 @@ class App(customtkinter.CTk):
         # --- 数据状态 ---
         self.accounts_data = {}  # {'email': {'password': '...', 'status': '...', 'log': '', 'widget': AccountRow}}
         self.configs = {}
-        self.gui_queue = queue.Queue()
+        self.gui_queue = None # Will be created by the Manager on start
         self.all_keys = set()
         self.full_log = ""
         self.is_running = False
-        self.processing_thread = None # 对处理线程的引用
-        self.stop_event = threading.Event() # 用于停止的事件
+        self.processing_thread = None
+        self.stop_event = threading.Event()
+        self.executor = None
+        self.manager = None # Process Manager
         self.start_time = 0
         self.log_windows = {} # 追踪打开的日志窗口
         self.filter_vars = {} # 用于存储筛选复选框的状态
+        # --- Performance Optimization: Cached Stats ---
+        self._success_count = 0
+        self._partial_count = 0
+        self._failure_count = 0
+        self.worker_pids = {} # {email: pid}
+        self.logger = logging.getLogger(__name__)
+        self.last_calculated_eta = 0
+        self.time_of_last_eta_update = 0
 
         # --- UI布局 ---
         self._create_widgets()
         self._load_configs()
         self.after(100, self._process_gui_queue)
+        # --- 绑定健壮的关闭协议 ---
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def _create_widgets(self):
         self.grid_columnconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=0)  # 为右侧按钮添加新列
         self.grid_rowconfigure(2, weight=1) # 中间行（列表）将占据大部分空间
 
         # --- 顶部控制栏 ---
         self.top_frame = customtkinter.CTkFrame(self, height=50)
-        self.top_frame.grid(row=0, column=0, padx=10, pady=(10, 5), sticky="ew")
+        self.top_frame.grid(row=0, column=0, padx=(10, 0), pady=(10, 5), sticky="ew")
 
         self.load_button = customtkinter.CTkButton(self.top_frame, text="加载账户文件", command=self.load_accounts_file)
         self.load_button.pack(side="left", padx=5, pady=10)
@@ -203,18 +236,15 @@ class App(customtkinter.CTk):
         self.start_button = customtkinter.CTkButton(self.top_frame, text="开始处理", command=self.start_processing_thread, state="disabled")
         self.start_button.pack(side="left", padx=5, pady=10)
         
-        self.stop_button = customtkinter.CTkButton(self.top_frame, text="强制停止", command=self.stop_processing, state="disabled", fg_color="#D35400")
-        self.stop_button.pack(side="left", padx=5, pady=10)
-
         self.show_keys_button = customtkinter.CTkButton(self.top_frame, text="显示密钥", command=self.show_keys_window, state="disabled")
         self.show_keys_button.pack(side="left", padx=5, pady=10)
 
-        self.settings_button = customtkinter.CTkButton(self.top_frame, text="设置", command=self.open_settings_window)
-        self.settings_button.pack(side="right", padx=5, pady=10)
+        self.stop_button = customtkinter.CTkButton(self.top_frame, text="强制停止", command=self.stop_processing, state="disabled", fg_color="#D35400", hover_color="#A93226")
+        self.stop_button.pack(side="left", padx=5, pady=10)
 
         # --- 筛选和导出 ---
         self.filter_frame = customtkinter.CTkFrame(self)
-        self.filter_frame.grid(row=1, column=0, padx=10, pady=5, sticky="ew")
+        self.filter_frame.grid(row=1, column=0, padx=(10, 0), pady=5, sticky="ew")
 
         self.filter_label = customtkinter.CTkLabel(self.filter_frame, text="筛选:")
         self.filter_label.pack(side="left", padx=(10, 5), pady=5)
@@ -231,16 +261,20 @@ class App(customtkinter.CTk):
             cb.pack(side="left", padx=5, pady=5)
             self.filter_vars[key] = var
         
-        self.export_button = customtkinter.CTkButton(self.filter_frame, text="导出筛选账号", command=self.export_filtered_accounts)
-        self.export_button.pack(side="right", padx=10, pady=5)
+        # --- 右侧对齐按钮 ---
+        self.settings_button = customtkinter.CTkButton(self, text="设置", command=self.open_settings_window)
+        self.settings_button.grid(row=0, column=1, padx=(5, 10), pady=(10, 5), sticky="ew")
+
+        self.export_button = customtkinter.CTkButton(self, text="导出筛选账号", command=self.export_filtered_accounts)
+        self.export_button.grid(row=1, column=1, padx=(5, 10), pady=5, sticky="ew")
 
         # --- 中部账户列表 ---
         self.scrollable_frame = customtkinter.CTkScrollableFrame(self, label_text="账户列表")
-        self.scrollable_frame.grid(row=2, column=0, padx=10, pady=0, sticky="nsew")
+        self.scrollable_frame.grid(row=2, column=0, columnspan=2, padx=10, pady=0, sticky="nsew")
 
         # --- 底部状态栏 ---
         self.status_bar = customtkinter.CTkFrame(self, height=30)
-        self.status_bar.grid(row=3, column=0, padx=10, pady=10, sticky="ew")
+        self.status_bar.grid(row=3, column=0, columnspan=2, padx=10, pady=10, sticky="ew")
         self.status_bar.grid_columnconfigure(0, weight=1)
 
         self.progress_bar = customtkinter.CTkProgressBar(self.status_bar)
@@ -312,13 +346,21 @@ class App(customtkinter.CTk):
         for widget in self.scrollable_frame.winfo_children():
             widget.destroy()
         self.accounts_data = {}
+        self._success_count = 0
+        self._partial_count = 0
+        self._failure_count = 0
+        self.all_keys.clear()
+        self.progress_bar.set(0)
+        self.last_calculated_eta = 0
+        self.time_of_last_eta_update = 0
+
 
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line: continue
-                    parts = line.replace(",", "|").split("|")
+                    parts = re.split(r'[,\s|]+', line)
                     if len(parts) >= 2 and parts[0] and parts[1]:
                         email, password = parts[0].strip(), parts[1].strip()
                         if email not in self.accounts_data:
@@ -337,14 +379,24 @@ class App(customtkinter.CTk):
         
         # 准备待处理列表，只包括非成功的账号
         accounts_to_process = []
+        # --- Performance Optimization: Reset stats before run ---
+        self._success_count = 0
+        self._partial_count = 0
+        self._failure_count = 0
+        self.last_calculated_eta = 0
+        self.time_of_last_eta_update = 0
+        
         for email, data in self.accounts_data.items():
-            if data["status"] != STATUS_SUCCESS:
+            # Always recount successful ones for the progress bar logic
+            if data["status"] == STATUS_SUCCESS:
+                self._success_count += 1
+            else:
                 accounts_to_process.append((email, data['password']))
                 # 重置这些账号的状态以便重试
                 data["status"] = STATUS_PENDING
                 data["log"] = "" # 可选：清空旧日志
                 data["widget"].set_status(STATUS_PENDING, error_message=None)
-        
+
         if not accounts_to_process:
             messagebox.showinfo("无需操作", "所有账号均已成功处理。")
             return
@@ -352,6 +404,7 @@ class App(customtkinter.CTk):
         self.is_running = True
         self.stop_event.clear() # 重置停止事件
         # 注意：不清空 all_keys，以便累积
+        self.worker_pids.clear()
         self.full_log += f"\n\n--- 新任务轮次开始于: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---\n\n"
         self.start_time = time.time()
         
@@ -365,35 +418,114 @@ class App(customtkinter.CTk):
         max_workers = int(self.configs.get("max_workers", 4))
         desired_keys = int(self.configs.get("desired_keys", 0))
 
+        # --- Correct IPC Setup ---
+        # The Manager creates shared objects that can be passed to child processes.
+        self.manager = multiprocessing.Manager()
+        self.gui_queue = self.manager.Queue()
+        self.executor = concurrent.futures.ProcessPoolExecutor(max_workers=max_workers)
+
         self.processing_thread = threading.Thread(
             target=self._thread_target_wrapper,
-            args=(accounts_to_process, max_workers, self.gui_queue, self.stop_event, self.configs.get("browser_path"), self.configs.get("save_path"), desired_keys),
+            args=(
+                self.executor,
+                accounts_to_process, self.gui_queue, self.stop_event,
+                self.configs, # 传递整个配置字典
+            ),
             daemon=True
         )
         self.processing_thread.start()
-        self._update_status_bar() # 启动计时器
+        self._update_status_bar()
 
-    def stop_processing(self):
+    def stop_processing(self, force_after_timeout=True):
         if not self.is_running: return
-        self.stop_event.set() # 发出停止信号
-        self.stop_button.configure(state="disabled") # 禁用按钮防止重复点击
-        messagebox.showwarning("正在停止...", "已发送停止信号，请等待当前运行的任务完成。")
 
-    def _thread_target_wrapper(self, accounts_list, max_workers, gui_queue, stop_event, browser_path, save_path, desired_keys):
-        """包装 start_processing 以捕获启动异常。"""
+        self.stop_button.configure(state="disabled", text="停止中...")
+        
+        if not self.stop_event.is_set():
+            self.stop_event.set()
+            
+        if not force_after_timeout:
+            return
+
+        # --- Fix race condition by copying PIDs immediately ---
+        pids_to_kill = list(self.worker_pids.values())
+        self.worker_pids.clear() # Prevent the main thread from using a stale list
+
+        # --- Two-phase termination: Graceful shutdown then Force kill ---
+        def killer(pids):
+            # Phase 1: Graceful shutdown
+            if self.executor:
+                self.executor.shutdown(wait=False)  # Send SIGTERM to children
+
+            # Give processes a moment to shut down gracefully
+            if self.processing_thread:
+                self.processing_thread.join(timeout=3.0)
+
+            # Phase 2: Recursively collect all child PIDs for a complete kill list
+            def get_child_pids(parent_pid):
+                """Recursively finds all child PIDs of a given parent PID."""
+                children = set()
+                try:
+                    if sys.platform == "win32":
+                        # Note: The 'where' clause must use single quotes in the shell,
+                        # but here we pass a list of args, so no inner quotes are needed.
+                        command = [
+                            'wmic', 'process', 'where', f'ParentProcessId={parent_pid}',
+                            'get', 'ProcessId'
+                        ]
+                        result = subprocess.run(command, capture_output=True, text=True, check=True)
+                        # WMIC output has a header ("ProcessId") and trailing whitespace.
+                        output_pids = result.stdout.strip().split('\n')[1:]
+                        child_pids = {int(p.strip()) for p in output_pids if p.strip().isdigit()}
+                        
+                        for child_pid in child_pids:
+                            children.add(child_pid)
+                            children.update(get_child_pids(child_pid))
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    # WMIC might not be found or return an error if no children exist.
+                    pass
+                return children
+
+            if pids:
+                self.logger.info(f"正在为 {len(pids)} 个工作进程收集完整的进程树...")
+                all_pids_to_kill = set(pids)
+                for pid in pids:
+                    child_pids = get_child_pids(pid)
+                    all_pids_to_kill.update(child_pids)
+                
+                self.logger.info(f"共收集到 {len(all_pids_to_kill)} 个相关进程。正在执行精确终止...")
+                for pid_to_kill in all_pids_to_kill:
+                    try:
+                        if sys.platform == "win32":
+                            # No /T needed as we are killing each process individually.
+                            subprocess.run(['taskkill', '/F', '/PID', str(pid_to_kill)], check=False, capture_output=True)
+                        else:
+                            os.kill(int(pid_to_kill), signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass # Process might already be gone
+
+            # Ensure the main executor is fully shut down
+            if self.executor:
+                self.executor.shutdown(wait=True)
+
+        threading.Thread(target=killer, args=(pids_to_kill,), daemon=True).start()
+
+    def _thread_target_wrapper(self, executor, accounts_list, gui_queue, stop_event, configs):
+        """包装 start_processing 以捕获启动异常，并管理executor的生命周期。"""
         try:
-            start_processing(accounts_list, max_workers, gui_queue, stop_event, browser_path, save_path, desired_keys)
+            start_processing(executor, accounts_list, gui_queue, stop_event, configs)
         except (DependenciesMissingError, GCloudNotInstalledError) as e:
-            # 捕获可预见的启动错误，并直接在主线程显示
-            messagebox.showerror("启动错误", str(e))
-            # 发送一个通用错误来停止UI
-            self.gui_queue.put({"account": GENERAL_ERROR_ACCOUNT, "status": STATUS_FAILURE, "reason": "启动前检查失败"})
+            # 进程池中的异常需要通过队列传递回主线程
+            self.gui_queue.put({"account": GENERAL_ERROR_ACCOUNT, "status": STATUS_FAILURE, "reason": str(e)})
         except Exception as e:
-            # 将其他启动时发生的严重错误发送回主线程
             error_msg = f"后台任务启动时发生未知错误: {e}"
             self.gui_queue.put({"account": GENERAL_ERROR_ACCOUNT, "status": STATUS_FAILURE, "reason": error_msg})
 
     def _process_gui_queue(self):
+        if not self.gui_queue: # Queue is not created until processing starts
+            self.after(100, self._process_gui_queue)
+            return
+            
         try:
             while not self.gui_queue.empty():
                 result = self.gui_queue.get_nowait()
@@ -421,6 +553,10 @@ class App(customtkinter.CTk):
                         self._task_finished()
                     continue
 
+                # 收集PID
+                if result.get("pid"):
+                    self.worker_pids[result.get("account")] = result.get("pid")
+
                 # 处理账户结果
                 email = result.get("account")
                 if email and email in self.accounts_data:
@@ -428,6 +564,23 @@ class App(customtkinter.CTk):
                     status = result.get("status", STATUS_FAILURE)
                     error_message = result.get("reason")
                     key_count = len(result.get("keys", []))
+                    
+                    # --- Performance Optimization: Incremental stat update ---
+                    if status == STATUS_SUCCESS:
+                        self._success_count += 1
+                    elif status == STATUS_PARTIAL_SUCCESS:
+                        self._partial_count += 1
+                    elif '失败' in status:
+                        self._failure_count += 1
+                    
+                    # Recalibrate ETA upon task completion
+                    elapsed = time.time() - self.start_time
+                    processed_count = self._success_count + self._partial_count + self._failure_count
+                    if processed_count > 0:
+                        avg_time_per_task = elapsed / processed_count
+                        remaining_tasks = len(self.accounts_data) - processed_count
+                        self.last_calculated_eta = remaining_tasks * avg_time_per_task
+                        self.time_of_last_eta_update = time.time()
 
                     self.accounts_data[email]["widget"].set_status(
                         status, error_message=error_message, key_count=key_count
@@ -437,38 +590,40 @@ class App(customtkinter.CTk):
                         self.all_keys.update(result["keys"])
                         self.show_keys_button.configure(state="normal")
                     
-                    self._update_status_bar()
+                    # If goal is achieved, trigger stop for all processes
+                    if result.get("goal_achieved"):
+                        self.logger.info("已达到目标密钥数，正在触发全局停止...")
+                        self.stop_processing(force_after_timeout=False) # Just set event, no killer thread
+
                     self._apply_filters() # 实时更新筛选视图
         except queue.Empty:
             pass
         finally:
             # 任务状态检查与UI更新
             if self.is_running:
-                task_is_over = False
-                # 条件1: 后台线程已不存在 (处理了正常结束和强制停止)
-                if not self.processing_thread or not self.processing_thread.is_alive():
-                    task_is_over = True
-                # 条件2: 所有任务都已完成 (正常结束的保险检查)
-                elif not self.stop_event.is_set() and all(d['status'] not in [STATUS_PENDING, STATUS_PROCESSING] for d in self.accounts_data.values()):
-                    task_is_over = True
+                is_thread_finished = not self.processing_thread or not self.processing_thread.is_alive()
                 
-                if task_is_over:
+                # The task is truly finished only when the thread has stopped AND the queue is empty.
+                if is_thread_finished and self.gui_queue.empty():
                     self._task_finished()
                 else:
-                    # 任务仍在运行, 仅更新状态栏计时器
+                    # While running, or if there are still messages, just update the status bar.
                     self._update_status_bar()
 
             self.after(100, self._process_gui_queue)
 
     def _task_finished(self):
+        was_stopped_by_user = self.stop_event.is_set()
         self.is_running = False
+        self.worker_pids.clear()
         self.start_button.configure(state="normal")
         self.load_button.configure(state="normal")
-        self.stop_button.configure(state="disabled")
+        self.stop_button.configure(state="disabled", text="强制停止")
+
+        self._update_status_bar() # Ensure final stats and progress are displayed
         
-        # 保存完整日志
-        # 修正：确保log目录与autogetkeys目录同级
-        log_dir = os.path.abspath(os.path.join(sys.path[0], "..", "log"))
+        # 无论如何都保存日志和密钥
+        log_dir = os.path.abspath(os.path.join(sys.path[0], "log"))
         os.makedirs(log_dir, exist_ok=True)
         log_filename = os.path.join(log_dir, f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
         try:
@@ -477,51 +632,52 @@ class App(customtkinter.CTk):
             log_msg = f"完整日志已保存到: {log_filename}"
         except Exception as e:
             log_msg = f"保存日志失败: {e}"
-
-        # 新增：自动保存密钥文件
+    
         keys_save_msg = ""
         if self.all_keys:
             save_path = self.configs.get("save_path")
             try:
-                # 如果用户在设置中指定了路径，则使用它，否则默认保存到log目录
                 keys_filename = save_path if save_path else os.path.join(log_dir, f"keys_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
-                
                 with open(keys_filename, "w", encoding="utf-8") as f:
                     f.write("\n".join(self.all_keys))
                 keys_save_msg = f"密钥已保存到: {os.path.abspath(keys_filename)}"
             except Exception as e:
                 keys_save_msg = f"保存密钥文件失败: {e}"
-
-        # 最终报告
+    
+        # 根据任务结束的原因显示不同的消息
         s_count, p_count, f_count, k_count = self._get_stats()
-        total_time = time.time() - self.start_time
-        
-        summary_lines = [f"成功: {s_count}"]
-        if p_count > 0:
-            summary_lines.append(f"部分成功: {p_count}")
-        summary_lines.append(f"失败: {f_count}")
-        summary = "\n".join(summary_lines)
-
-        messagebox.showinfo("任务完成",
-                            f"所有账号处理完毕！\n\n"
-                            f"{summary}\n"
-                            f"共获得密钥: {k_count}\n"
-                            f"总耗时: {time.strftime('%H:%M:%S', time.gmtime(total_time))}\n\n"
-                            f"{keys_save_msg}\n"
-                            f"{log_msg}")
+        if was_stopped_by_user:
+            messagebox.showinfo("任务已停止",
+                                f"任务已被用户手动停止。\n\n"
+                                f"当前进度:\n"
+                                f" - 成功: {s_count}, 部分成功: {p_count}, 失败: {f_count}\n"
+                                f" - 共获得密钥: {k_count}\n\n"
+                                f"{keys_save_msg}\n"
+                                f"{log_msg}")
+        else:
+            # 正常的任务完成报告
+            total_time = time.time() - self.start_time
+            summary_lines = [f"成功: {s_count}"]
+            if p_count > 0:
+                summary_lines.append(f"部分成功: {p_count}")
+            summary_lines.append(f"失败: {f_count}")
+            summary = "\n".join(summary_lines)
+            messagebox.showinfo("任务完成",
+                                f"所有账号处理完毕！\n\n"
+                                f"{summary}\n"
+                                f"共获得密钥: {k_count}\n"
+                                f"总耗时: {time.strftime('%H:%M:%S', time.gmtime(total_time))}\n\n"
+                                f"{keys_save_msg}\n"
+                                f"{log_msg}")
 
     def _get_stats(self):
-        success_count = sum(1 for d in self.accounts_data.values() if d.get('status') == STATUS_SUCCESS)
-        partial_count = sum(1 for d in self.accounts_data.values() if d.get('status') == STATUS_PARTIAL_SUCCESS)
-        # 统计所有包含“失败”字样的状态，这样更具弹性
-        failure_count = sum(1 for d in self.accounts_data.values() if '失败' in d.get('status', ''))
-        key_count = len(self.all_keys)
-        return success_count, partial_count, failure_count, key_count
+        # --- Performance Optimization: Use cached stats ---
+        return self._success_count, self._partial_count, self._failure_count, len(self.all_keys)
 
     def _update_status_bar(self):
         s_count, p_count, f_count, k_count = self._get_stats()
         total_count = len(self.accounts_data)
-        processed_count = sum(1 for d in self.accounts_data.values() if d.get('status') not in [STATUS_PENDING, STATUS_PROCESSING])
+        processed_count = s_count + p_count + f_count
 
         run_time_str = "00:00:00"
         eta_str = "--:--:--"
@@ -531,48 +687,17 @@ class App(customtkinter.CTk):
             elapsed = time.time() - self.start_time
             run_time_str = time.strftime('%H:%M:%S', time.gmtime(elapsed))
             
-            # --- 并行感知ETA和进度条算法 ---
-            try:
-                max_workers = int(self.configs.get("max_workers", 4))
-                if max_workers <= 0: max_workers = 1
-            except (ValueError, TypeError):
-                max_workers = 1
-
-            PRESET_TIME_PER_BATCH = 50  # 预设每批次任务耗时50秒
-
-            # 1. 计算总批次数
-            num_batches = math.ceil(total_count / max_workers)
-
-            # 2. 确定总预估时间
-            if processed_count > 0:
-                # 动态估算：基于已完成批次的平均耗时
-                # 注意：这里的 'processed_count' 是已完成的账号数，我们需要的是已完成的批次数
-                # 为了简化并得到一个平滑的估算，我们用 (已耗时 / 已完成账号数) 作为单个任务的平均时间
-                # 然后用这个时间去估算一个批次的平均时间
-                time_per_item_in_parallel = elapsed / processed_count
-                time_per_batch = time_per_item_in_parallel * max_workers
+            if total_count > 0:
+                progress = processed_count / total_count
                 
-                # 更稳健的估算：一个批次的耗时约等于完成该批次中最慢的那个任务的时间
-                # 我们用 (总耗时 / 完成的批次数) 来估算
-                num_processed_batches = math.ceil(processed_count / max_workers)
-                time_per_batch_estimated = elapsed / num_processed_batches
-                total_estimated_time = time_per_batch_estimated * num_batches
-            else:
-                # 初始估算：基于预设值
-                total_estimated_time = num_batches * PRESET_TIME_PER_BATCH
-
-            # 3. 基于总预估时间，派生出进度和剩余时间
-            if total_estimated_time > 0:
-                is_overtime = elapsed > total_estimated_time
-                all_done = processed_count == total_count
-
-                if is_overtime and not all_done:
-                    progress = 0.99 # 超时但未完成，卡在99%
-                    eta_str = "超时"
-                else:
-                    progress = min(elapsed / total_estimated_time, 1.0)
-                    eta = max(0, total_estimated_time - elapsed)
-                    eta_str = time.strftime('%H:%M:%S', time.gmtime(eta))
+                # 基于最后一次校准的结果进行平滑倒计时
+                if self.time_of_last_eta_update > 0 and processed_count < total_count:
+                    time_since_last_update = time.time() - self.time_of_last_eta_update
+                    current_eta = self.last_calculated_eta - time_since_last_update
+                    if current_eta < 0: current_eta = 0
+                    eta_str = time.strftime('%H:%M:%S', time.gmtime(current_eta))
+                elif self.is_running and processed_count == 0:
+                    eta_str = "正在计算..."
         
         # 任务结束时强制设置为100%
         if not self.is_running and total_count > 0 and processed_count == total_count:
@@ -607,7 +732,7 @@ class App(customtkinter.CTk):
             self.clipboard_clear()
             self.clipboard_append("\n".join(self.all_keys))
             copy_btn.configure(text="已复制!")
-            self.after(2000, lambda: copy_btn.configure(text="全部复制"))
+            self.after(2000, lambda: copy_btn.configure(text="全部复制") if copy_btn.winfo_exists() else None)
 
         def save_keys_as():
             filepath = filedialog.asksaveasfilename(
@@ -689,6 +814,40 @@ class App(customtkinter.CTk):
                 json.dump(self.configs, f, indent=4)
         except Exception as e:
             messagebox.showerror("配置保存失败", f"无法写入配置文件: {e}")
+
+    def on_closing(self):
+        """健壮的关闭协议，确保所有后台进程都被终止。"""
+        if self.is_running:
+            # 如果任务仍在运行，首先发出警告并给出取消的机会
+            if not messagebox.askyesno("确认退出", "任务仍在运行中，强制关闭可能会导致数据丢失。您确定要退出吗？"):
+                return # 用户取消了退出
+
+        # 1. 发出停止信号
+        self.stop_event.set()
+        
+        # 2. 禁用UI交互
+        self.start_button.configure(state="disabled")
+        self.stop_button.configure(state="disabled")
+        self.load_button.configure(state="disabled")
+        
+        # 3. 给予后台线程一小段反应时间
+        self.status_label.configure(text="正在等待后台任务终止...")
+        self.update_idletasks() # 强制UI更新
+        
+        # 4. 强制关闭 Executor
+        if self.is_running and self.executor:
+            self.executor.shutdown(wait=True) # 在关闭窗口前，确保进程池已关闭
+        
+        # 5. 关闭 Manager 进程
+        if self.manager:
+            self.manager.shutdown()
+
+        # 6. 等待后台线程结束
+        if self.processing_thread and self.processing_thread.is_alive():
+            self.processing_thread.join(timeout=1.0)
+
+        # 7. 销毁窗口
+        self.destroy()
 
 if __name__ == "__main__":
     app = App()
