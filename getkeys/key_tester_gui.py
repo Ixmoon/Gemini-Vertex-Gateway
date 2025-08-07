@@ -19,6 +19,7 @@ class ElegantGeminiKeyChecker:
         self.config_path = 'key_tester_gui_config.json'
         self.SECRETS_CONFIG_PATH = 'secrets.config.json'
         self.max_workers_var = tk.IntVar(value=50)
+        self.max_retries_var = tk.IntVar(value=3)
         self.pending_ui_updates = []
         self.ui_update_scheduled = False
 
@@ -119,8 +120,14 @@ class ElegantGeminiKeyChecker:
         self.max_workers_spinbox = ttk.Spinbox(options_frame, from_=1, to=500, textvariable=self.max_workers_var, width=8)
         self.max_workers_spinbox.grid(row=0, column=3, sticky="w")
 
+        max_retries_label = ttk.Label(options_frame, text="重试次数:")
+        max_retries_label.grid(row=0, column=4, sticky="w", padx=(15, 5))
+
+        self.max_retries_spinbox = ttk.Spinbox(options_frame, from_=0, to=10, textvariable=self.max_retries_var, width=8)
+        self.max_retries_spinbox.grid(row=0, column=5, sticky="w")
+
         self.status_bar = ttk.Label(options_frame, text="准备就绪", anchor='w', foreground=self.colors["fg_subtle"])
-        self.status_bar.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        self.status_bar.grid(row=1, column=0, columnspan=6, sticky="ew", pady=(10, 0))
         
         paned_window.add(input_container, weight=1)
 
@@ -240,22 +247,35 @@ class ElegantGeminiKeyChecker:
 
     async def validate_key_async(self, key, http_options, item_id):
         status, details, tag = "错误", "未知错误", "invalid"
-        client = None
-        try:
-            client = Client(api_key=key, http_options=http_options)
-            await client.aio.models.get(model="models/gemini-2.0-flash")
-            status, details, tag = "有效", "密钥有效", "valid"
-        except Exception as e:
-            error_str = str(e).lower()
-            if "permission denied" in error_str or "api key not valid" in error_str or "unauthenticated" in error_str:
-                status, details, tag = "无效", f"认证失败: {repr(e)}", "invalid"
-            elif "not found" in error_str:
-                status, details, tag = "无效", f"模型或端点未找到: {repr(e)}", "invalid"
-            else:
-                status, details, tag = "无效", repr(e), "invalid"
-        finally:
-            self.key_statuses[key] = tag
-            self.root.after(0, self.schedule_ui_update, item_id, key, status, details, tag)
+        max_retries = self.max_retries_var.get()
+        
+        for attempt in range(max_retries + 1):
+            try:
+                client = Client(api_key=key, http_options=http_options)
+                await client.aio.models.get(model="models/gemini-2.0-flash")
+                status, details, tag = "有效", "密钥有效", "valid"
+                break
+            except Exception as e:
+                error_str = str(e).lower()
+
+                if "permission denied" in error_str or "api key not valid" in error_str or "unauthenticated" in error_str:
+                    status, details, tag = "无效", f"认证失败: {repr(e)}", "invalid"
+                    break
+                if "not found" in error_str:
+                    status, details, tag = "无效", f"模型或端点未找到: {repr(e)}", "invalid"
+                    break
+
+                if attempt < max_retries:
+                    details = f"尝试 {attempt + 1}/{max_retries + 1} 失败，将重试..."
+                    self.root.after(0, self.schedule_ui_update, item_id, key, "重试中", details, 'checking')
+                    await asyncio.sleep(1 * (attempt + 1))
+                    continue
+                else:
+                    status, details, tag = "无效", f"重试 {max_retries} 次后失败: {repr(e)}", "invalid"
+                    break
+        
+        self.key_statuses[key] = tag
+        self.root.after(0, self.schedule_ui_update, item_id, key, status, details, tag)
 
     def schedule_ui_update(self, item_id, key, status, details, tag):
         self.pending_ui_updates.append((item_id, key, status, details, tag))
@@ -390,12 +410,17 @@ class ElegantGeminiKeyChecker:
         if isinstance(max_workers, int) and 1 <= max_workers <= 500:
             self.max_workers_var.set(max_workers)
         
+        max_retries = gui_config.get("maxRetries", 3)
+        if isinstance(max_retries, int) and 0 <= max_retries <= 10:
+            self.max_retries_var.set(max_retries)
+
         self.update_status("已加载配置。")
 
     def save_gui_config(self):
         gui_config = {
             "customApiEndpoint": self.api_endpoint_var.get().strip(),
-            "maxWorkers": self.max_workers_var.get()
+            "maxWorkers": self.max_workers_var.get(),
+            "maxRetries": self.max_retries_var.get()
         }
         self._write_json_config(self.config_path, gui_config)
 

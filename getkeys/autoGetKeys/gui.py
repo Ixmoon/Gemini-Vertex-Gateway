@@ -16,6 +16,13 @@ import subprocess
 import concurrent.futures
 from datetime import datetime
 import re
+import requests
+import uuid
+import platform
+import hashlib
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
+import base64
 
 # 确保可以从父目录导入 getkeys
 try:
@@ -34,6 +41,162 @@ except ImportError:
 # --- 全局常量 ---
 CONFIG_FILE = "gui_config.json"
 APP_NAME = "Gemini API 密钥获取工具"
+
+# --- 授权常量 ---
+# 重要：请替换为您的实际服务器URL
+AUTH_SERVER_URL = "https://your-deno-deploy-url.deno.dev/auth"
+# 重要：此密钥必须与服务器上的密钥匹配。
+# 它应该是16、24或32字节的字符串。
+# 对于生产环境，请考虑使用更安全的方式来存储/混淆此密钥。
+AES_KEY = b'YourSecretKey12345678901234567890' # 32字节，用于AES-256
+LICENSE_FILE = "license.json"
+
+# --- 授权逻辑 ---
+class LicenseManager:
+    def __init__(self):
+        self.machine_code = self._get_machine_code()
+
+    def _get_machine_code(self):
+        """生成唯一的机器标识符。"""
+        try:
+            # 结合多个标识符以增强鲁棒性
+            info_str = ""
+            # 1. MAC地址
+            info_str += str(uuid.getnode())
+            # 2. 平台信息
+            info_str += platform.system() + platform.machine() + platform.processor()
+            # 3. 在Windows上，尝试获取CPU和主板序列号
+            if platform.system() == "Windows":
+                try:
+                    # 使用CREATE_NO_WINDOW标志来防止弹出黑框
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    
+                    cpu_id = subprocess.check_output('wmic cpu get ProcessorId', startupinfo=startupinfo, text=True, stderr=subprocess.DEVNULL).strip().split('\n')[-1]
+                    baseboard_id = subprocess.check_output('wmic baseboard get SerialNumber', startupinfo=startupinfo, text=True, stderr=subprocess.DEVNULL).strip().split('\n')[-1]
+                    info_str += cpu_id + baseboard_id
+                except Exception:
+                    pass # 如果wmic失败则忽略
+            
+            # 哈希组合字符串以获得固定长度的匿名ID
+            h = hashlib.sha256(info_str.encode('utf-8'))
+            return h.hexdigest()
+        except Exception:
+            # 任何错误的备用方案
+            return hashlib.sha256(str(uuid.getnode()).encode()).hexdigest()
+
+    def _encrypt(self, data):
+        """使用AES加密数据。"""
+        cipher = AES.new(AES_KEY, AES.MODE_CBC)
+        ct_bytes = cipher.encrypt(pad(data.encode('utf-8'), AES.block_size))
+        iv = base64.b64encode(cipher.iv).decode('utf-8')
+        ct = base64.b64encode(ct_bytes).decode('utf-8')
+        return json.dumps({'iv': iv, 'ciphertext': ct})
+
+    def _decrypt(self, json_input):
+        """使用AES解密数据。"""
+        try:
+            b64 = json.loads(json_input)
+            iv = base64.b64decode(b64['iv'])
+            ct = base64.b64decode(b64['ciphertext'])
+            cipher = AES.new(AES_KEY, AES.MODE_CBC, iv)
+            pt = unpad(cipher.decrypt(ct), AES.block_size)
+            return pt.decode('utf-8')
+        except (ValueError, KeyError, json.JSONDecodeError):
+            return None
+
+    def save_license_key(self, key):
+        try:
+            with open(LICENSE_FILE, "w", encoding="utf-8") as f:
+                json.dump({"license_key": key}, f)
+        except Exception:
+            pass # 静默失败
+
+    def load_license_key(self):
+        if not os.path.exists(LICENSE_FILE):
+            return None
+        try:
+            with open(LICENSE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("license_key")
+        except Exception:
+            return None
+
+    def handle_auth_failure(self):
+        """处理授权失败，删除无效的许可证文件。"""
+        if os.path.exists(LICENSE_FILE):
+            try:
+                os.remove(LICENSE_FILE)
+            except OSError:
+                pass
+
+    def verify_license(self):
+        """主授权验证流程。"""
+        license_key = self.load_license_key()
+        is_first_time = not license_key
+
+        if not license_key:
+            dialog = customtkinter.CTkInputDialog(text="请输入您的授权码:", title="软件授权")
+            dialog.attributes("-topmost", True)
+            license_key = dialog.get_input()
+            if not license_key:
+                messagebox.showerror("授权失败", "未提供授权码，程序将退出。")
+                return False
+        
+        payload = {"machine_code": self.machine_code, "license_key": license_key}
+        
+        wait_win = None
+        try:
+            encrypted_payload = self._encrypt(json.dumps(payload))
+            headers = {'Content-Type': 'application/json'}
+            
+            wait_win = customtkinter.CTkToplevel()
+            wait_win.geometry("300x100")
+            wait_win.title("请稍候")
+            wait_win.attributes("-topmost", True)
+            wait_win.protocol("WM_DELETE_WINDOW", lambda: None)  # Disable closing
+            label = customtkinter.CTkLabel(wait_win, text="正在连接授权服务器，请稍候...")
+            label.pack(padx=20, pady=20)
+            wait_win.update()
+
+            response = requests.post(AUTH_SERVER_URL, data=encrypted_payload, headers=headers, timeout=15)
+            wait_win.destroy()
+
+            if response.status_code != 200:
+                messagebox.showerror("授权失败", f"服务器错误 (代码: {response.status_code}):\n{response.text}")
+                self.handle_auth_failure()
+                return False
+
+            auth_token = self._decrypt(response.text)
+            if not auth_token:
+                messagebox.showerror("授权失败", "无法验证服务器响应。")
+                self.handle_auth_failure()
+                return False
+
+            parts = auth_token.split('|')
+            if len(parts) != 2 or parts[0] != self.machine_code:
+                messagebox.showerror("授权失败", "授权令牌无效或与本机不匹配。")
+                self.handle_auth_failure()
+                return False
+            
+            server_timestamp = int(parts[1])
+            if abs(time.time() - server_timestamp) > 120:
+                messagebox.showwarning("授权警告", "系统时间与服务器时间差距过大，请同步时间后重试。")
+                return False
+
+            self.save_license_key(license_key)
+            if is_first_time:
+                messagebox.showinfo("授权成功", "感谢您的支持，软件已成功激活！")
+            return True
+
+        except requests.exceptions.RequestException as e:
+            if wait_win and wait_win.winfo_exists(): wait_win.destroy()
+            messagebox.showerror("网络错误", f"无法连接到授权服务器: {e}")
+            return False
+        except Exception as e:
+            if wait_win and wait_win.winfo_exists(): wait_win.destroy()
+            messagebox.showerror("未知错误", f"发生意外的授权错误: {e}")
+            return False
 
 # --- 自定义组件 ---
 class AccountRow(customtkinter.CTkFrame):
@@ -850,5 +1013,20 @@ class App(customtkinter.CTk):
         self.destroy()
 
 if __name__ == "__main__":
-    app = App()
-    app.mainloop()
+    # 为了使用CTk对话框，需要一个根窗口。
+    # 我们创建一个临时的、隐藏的根窗口来处理授权流程。
+    temp_root = customtkinter.CTk()
+    temp_root.withdraw()
+
+    license_manager = LicenseManager()
+    is_licensed = license_manager.verify_license()
+    
+    temp_root.destroy()
+
+    if is_licensed:
+        app = App()
+        app.mainloop()
+    else:
+        # 授权失败的消息已由verify_license显示
+        # 程序直接退出
+        sys.exit(1)
