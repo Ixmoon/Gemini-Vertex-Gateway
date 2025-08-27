@@ -225,23 +225,34 @@ export class VertexAIStrategy extends BaseStrategy {
         const loc = this.config.gcpDefaultLocation;
         const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
 
-        // 1. Extract API version from the path, default to 'v1' if not present.
-        // This regex is designed to be future-proof, matching patterns like /v1/, /v1beta/, /v2alpha1/, etc.
-        const apiVersion = 'v1';
+        // 1. 查找第一个版本字符串并确定 API 版本和相关路径
+        const pathParts = ctx.path.split('/');
+        let apiVersion = 'v1'; // 默认版本
+        let relevantPathIndex = -1;
 
-        // 2. Construct the base URL with the dynamic version.
+        for (let i = 0; i < pathParts.length; i++) {
+            if (pathParts[i].match(/^v\d+([a-zA-Z]+\d*)?$/)) {
+                apiVersion = pathParts[i];
+                relevantPathIndex = i + 1;
+                break;
+            }
+        }
+
+        // 如果没有找到版本，则整个路径都是相关的 (去掉开头的斜杠)
+        const relevantPath = relevantPathIndex !== -1
+            ? pathParts.slice(relevantPathIndex).join('/')
+            : ctx.path.startsWith('/') ? ctx.path.substring(1) : ctx.path;
+        
+        // 2. 构建基础 URL
         const baseUrl = `https://${host}/${apiVersion}/projects/${auth.gcpProject}/locations/${loc}/publishers/google`;
-
-        // 3. Strip the version prefix to get the relevant part of the path.
-        const relevantPath = ctx.path.replace(new RegExp(`^/${apiVersion}/`), '/');
 
         let targetUrlPath: string;
 
-        // 4. Process the relevant path.
-        if (relevantPath === '/models') {
+        // 3. 根据相关路径判断请求类型
+        if (relevantPath === 'models') {
             targetUrlPath = `${baseUrl}/models`;
         } else {
-            const modelMatch = relevantPath.match(/\/models\/([^:]+):/);
+            const modelMatch = relevantPath.match(/^models\/([^:]+):/);
             const model = modelMatch ? modelMatch[1] : null;
 
             const actionMatch = relevantPath.match(/:([^:]+)$/);
@@ -364,22 +375,43 @@ export class GeminiNativeStrategy extends BaseStrategy {
         const model = ctx.path.match(/\/models\/([^:]+):/)?.[1] ?? null;
         return Promise.resolve(_getGeminiAuthDetails(c, ctx, model, attempt, "Gemini Native"));
     }
-    override buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
-        // Resumable Upload PUT requests are sent to a path like /gemini/upload/v1beta/files...
-        // The ctx.path will be /upload/v1beta/files...
+    override buildTargetUrl(ctx: StrategyContext, _auth: AuthenticationDetails): URL {
+        // 特殊处理：PUT 请求是用于可恢复上传的，其路径是 Google 返回的完整路径，不应修改。
         if (ctx.originalRequest.method === 'PUT' && ctx.path.startsWith('/upload/')) {
-            const targetUrl = new URL(GEMINI_UPLOAD_URL); // e.g. https://generativelanguage.googleapis.com/upload
-            targetUrl.pathname = ctx.path; // e.g. /upload/v1beta/files
-            targetUrl.search = ctx.originalUrl.search; // all original query params
+            const targetUrl = new URL(GEMINI_UPLOAD_URL);
+            targetUrl.pathname = ctx.path; // e.g., /upload/v1beta/files/some-id
+            targetUrl.search = ctx.originalUrl.search;
             return targetUrl;
         }
 
-        // For other requests, including the initial POST to create an upload session
-        const isUpload = ctx.originalRequest.method === 'POST' && ctx.path.includes('/files');
-        const baseUrl = isUpload ? GEMINI_UPLOAD_URL : GEMINI_BASE_URL;
-        const url = new URL(ctx.path, baseUrl);
+        // 对于所有其他请求 (POST, GET)
+        const pathParts = ctx.path.split('/');
+        let apiVersion = 'v1beta'; // Gemini Native 的默认版本
+        let relevantPathIndex = -1;
 
-        // Copy search params from original request, excluding auth key
+        // 查找第一个版本字符串
+        for (let i = 0; i < pathParts.length; i++) {
+            if (pathParts[i].match(/^v\d+([a-zA-Z]+\d*)?$/)) {
+                apiVersion = pathParts[i];
+                relevantPathIndex = i + 1;
+                break;
+            }
+        }
+
+        // 获取版本号之后的核心路径
+        const relevantPath = relevantPathIndex !== -1
+            ? pathParts.slice(relevantPathIndex).join('/')
+            : ctx.path.startsWith('/') ? ctx.path.substring(1) : ctx.path;
+
+        // 判断是普通 API 请求还是文件上传会话创建请求
+        const isUpload = relevantPath.startsWith('files');
+        const baseUrl = isUpload ? GEMINI_UPLOAD_URL : GEMINI_BASE_URL;
+        
+        // 重新组合成干净的 URL 路径
+        const finalPath = `/${apiVersion}/${relevantPath}`;
+        const url = new URL(finalPath, baseUrl);
+
+        // 复制查询参数
         ctx.originalUrl.searchParams.forEach((v, k) => {
             if (k.toLowerCase() !== 'key') {
                 url.searchParams.set(k, v);
