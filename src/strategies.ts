@@ -241,7 +241,7 @@ export class VertexAIStrategy extends BaseStrategy {
         // 检查是否是模型列表请求 (例如：/models)
         if (cleanedPath === '/models') {
             targetPath = `/v1/projects/${auth.gcpProject}/locations/${loc}/models`;
-            queryParamsToAdd['filter'] = 'publisher="google"';
+            queryParamsToAdd['filter'] = 'publisher=google';
         }
         // 检查是否是特定模型操作请求 (例如：/models/gemini-pro:generateContent)
         else {
