@@ -240,9 +240,17 @@ export class VertexAIStrategy extends BaseStrategy {
 
         // 检查是否是模型列表请求 (例如：/models)
         if (cleanedPath === '/models') {
-            targetPath = `/v1/projects/${auth.gcpProject}/locations/${loc}/models`;
-            // 手动附加 filter 参数，以绕过 URLSearchParams 的潜在编码问题
-            targetPath += '?filter=publisher="google"';
+            // 对于模型列表，'global' 是无效 location。如果当前是 global，则修正为有效的默认区域。
+            const correctedLoc = loc === 'global' ? 'us-central1' : loc;
+            const host = `${correctedLoc}-aiplatform.googleapis.com`;
+            targetPath = `/v1/projects/${auth.gcpProject}/locations/${correctedLoc}/publishers/google/models`;
+            
+            // 因为 location 可能已改变，所以需要重新构建 URL 对象
+            const url = new URL(`https://${host}${targetPath}`);
+            ctx.originalUrl.searchParams.forEach((v, k) => {
+                if (k.toLowerCase() !== 'key') url.searchParams.set(k, v);
+            });
+            return url;
         }
         // 检查是否是特定模型操作请求 (例如：/models/gemini-pro:generateContent)
         else {
@@ -259,13 +267,12 @@ export class VertexAIStrategy extends BaseStrategy {
             targetPath = `/v1/projects/${auth.gcpProject}/locations/${loc}/publishers/google/models/${model}:${action}`;
         }
 
-        // 3. 构造最终的 URL
+        // 3. 构造最终的 URL (适用于非模型列表的情况)
         const url = new URL(`https://${host}${targetPath}`);
 
         // 4. 复制原始请求中的其他查询参数
-        // 排除 'key' 和我们已经手动处理的 'filter'
         ctx.originalUrl.searchParams.forEach((v, k) => {
-            if (k.toLowerCase() !== 'key' && k.toLowerCase() !== 'filter') {
+            if (k.toLowerCase() !== 'key') {
                 url.searchParams.set(k, v);
             }
         });
