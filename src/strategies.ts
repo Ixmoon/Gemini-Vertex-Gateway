@@ -224,24 +224,32 @@ export class VertexAIStrategy extends BaseStrategy {
 
         const loc = this.config.gcpDefaultLocation;
         const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
-        const baseUrl = `https://${host}/v1/projects/${auth.gcpProject}/locations/${loc}/publishers/google`;
+
+        // 1. Extract API version from the path, default to 'v1' if not present.
+        // This regex is designed to be future-proof, matching patterns like /v1/, /v1beta/, /v2alpha1/, etc.
+        const versionMatch = ctx.path.match(/^\/(v\d+([a-zA-Z]+\d*)?)\//);
+        const apiVersion = versionMatch ? versionMatch[1] : 'v1';
+
+        // 2. Construct the base URL with the dynamic version.
+        const baseUrl = `https://${host}/${apiVersion}/projects/${auth.gcpProject}/locations/${loc}/publishers/google`;
+
+        // 3. Strip the version prefix to get the relevant part of the path.
+        const relevantPath = ctx.path.replace(new RegExp(`^/${apiVersion}/`), '/');
 
         let targetUrlPath: string;
 
-        // Case 1: Requesting a list of models (e.g., /models)
-        if (ctx.path.endsWith('/models')) {
-            targetUrlPath = `${baseUrl}${ctx.path}`; // e.g., .../publishers/google/models
-        }
-        // Case 2: Requesting a specific model with an action (e.g., /models/gemini-pro:generateContent)
-        else {
-            const modelMatch = ctx.path.match(/\/models\/([^:]+):/);
+        // 4. Process the relevant path.
+        if (relevantPath === '/models') {
+            targetUrlPath = `${baseUrl}/models`;
+        } else {
+            const modelMatch = relevantPath.match(/\/models\/([^:]+):/);
             const model = modelMatch ? modelMatch[1] : null;
 
-            const actionMatch = ctx.path.match(/:([^:]+)$/);
+            const actionMatch = relevantPath.match(/:([^:]+)$/);
             const action = actionMatch ? actionMatch[1] : null;
 
             if (!model || !action) {
-                throw new Response("Vertex AI request path must include a valid model ID and API action (e.g., /models/gemini-pro:generateContent) or end with /models for listing.", { status: 400 });
+                throw new Response(`Vertex AI request path could not be parsed. Path: ${ctx.path}`, { status: 400 });
             }
             targetUrlPath = `${baseUrl}/models/${model}:${action}`;
         }
