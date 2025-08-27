@@ -222,37 +222,28 @@ export class VertexAIStrategy extends BaseStrategy {
     override buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
         if (!auth.gcpProject) throw new Error("Vertex AI requires a GCP Project ID.");
 
-        const loc = this.config.gcpDefaultLocation;
+        // 1. Extract location from the incoming path.
+        // e.g., /v1/projects/some-project/locations/us-central1/models
+        const locationMatch = ctx.path.match(/\/locations\/([^\/]+)/);
+        const loc = locationMatch ? locationMatch[1] : this.config.gcpDefaultLocation;
+        
+        if (!loc) throw new Error("Could not determine GCP location from path or config.");
+
         const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
-        const baseUrl = `https://${host}/v1/projects/${auth.gcpProject}/locations/${loc}/publishers/google`;
 
-        // Strip any leading version string like /v1/ or /v1beta/ from the path
-        const relevantPath = ctx.path.replace(/^\/v\d+(beta\d*)?\//, '/');
+        // The client path is already well-formed, so we can use it directly.
+        const url = new URL(`https://${host}${ctx.path}`);
 
-        let targetUrlPath: string;
-
-        // Case 1: Requesting a list of models (e.g., /models)
-        if (relevantPath === '/models') {
-            targetUrlPath = `${baseUrl}/models`;
+        // 2. If it's a model listing request, add the required filter.
+        // As per user instruction, the path for this is '.../models'
+        if (ctx.path.endsWith('/models')) {
+            url.searchParams.set('filter', 'publisher="google"');
         }
-        // Case 2: Requesting a specific model with an action (e.g., /models/gemini-pro:generateContent)
-        else {
-            const modelMatch = relevantPath.match(/\/models\/([^:]+):/);
-            const model = modelMatch ? modelMatch[1] : null;
-
-            const actionMatch = relevantPath.match(/:([^:]+)$/);
-            const action = actionMatch ? actionMatch[1] : null;
-
-            if (!model || !action) {
-                throw new Response(`Vertex AI request path could not be parsed. Path: ${ctx.path}`, { status: 400 });
-            }
-            targetUrlPath = `${baseUrl}/models/${model}:${action}`;
-        }
-
-        const url = new URL(targetUrlPath);
-        // Copy search params from original request, excluding auth key
+        
+        // 3. Copy other search params from original request, excluding auth key.
         ctx.originalUrl.searchParams.forEach((v, k) => {
-            if (k.toLowerCase() !== 'key') {
+            // Avoid overwriting the filter we just set and the auth key.
+            if (k.toLowerCase() !== 'key' && k.toLowerCase() !== 'filter') {
                 url.searchParams.set(k, v);
             }
         });
