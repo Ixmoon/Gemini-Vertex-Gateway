@@ -222,55 +222,35 @@ export class VertexAIStrategy extends BaseStrategy {
     override buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
         if (!auth.gcpProject) throw new Error("Vertex AI requires a GCP Project ID.");
 
-        // 1. 从原始请求路径中提取 location。
-        // 原始请求路径可能形如 /v1/projects/PROJECT_ID/locations/LOCATION_ID/models 或 /v1beta/models/MODEL_ID:ACTION
-        const locationMatch = ctx.path.match(/\/locations\/([^\/]+)/);
-        const loc = locationMatch ? locationMatch[1] : this.config.gcpDefaultLocation;
-        
-        if (!loc) throw new Error("Could not determine GCP location from path or config.");
-
+        const loc = this.config.gcpDefaultLocation;
         const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
+        const baseUrl = `https://${host}/v1/projects/${auth.gcpProject}/locations/${loc}/publishers/google`;
 
-        let targetPath: string;
-        let queryParamsToAdd: Record<string, string> = {};
+        // Strip any leading version string like /v1/ or /v1beta/ from the path
+        const relevantPath = ctx.path.replace(/^\/v\d+(beta\d*)?\//, '/');
 
-        // 2. 根据原始请求路径的结构，判断是模型列表请求还是特定模型操作请求，并构造目标路径。
-        // 移除原始路径中可能存在的 API 版本前缀，以便更准确地匹配。
-        const cleanedPath = ctx.path.replace(/^\/v\d+(beta\d*)?\//, '/');
+        let targetUrlPath: string;
 
-        // 检查是否是模型列表请求 (例如：/models)
-        if (cleanedPath === '/models') {
-            // 对于模型列表，'global' 是无效 location。如果当前是 global，则修正为有效的默认区域。
-            const correctedLoc = loc === 'global' ? 'us-central1' : loc;
-            const host = `${correctedLoc}-aiplatform.googleapis.com`;
-            // 这是官方文档支持的、获取区域内所有模型的端点。我们将在 handleResponse 中进行过滤。
-            targetPath = `/v1/projects/${auth.gcpProject}/locations/${correctedLoc}/models`;
-            
-            const url = new URL(`https://${host}${targetPath}`);
-            ctx.originalUrl.searchParams.forEach((v, k) => {
-                if (k.toLowerCase() !== 'key') url.searchParams.set(k, v);
-            });
-            return url;
+        // Case 1: Requesting a list of models (e.g., /models)
+        if (relevantPath === '/models') {
+            targetUrlPath = `${baseUrl}/models`;
         }
-        // 检查是否是特定模型操作请求 (例如：/models/gemini-pro:generateContent)
+        // Case 2: Requesting a specific model with an action (e.g., /models/gemini-pro:generateContent)
         else {
-            const modelMatch = cleanedPath.match(/\/models\/([^:]+):/);
+            const modelMatch = relevantPath.match(/\/models\/([^:]+):/);
             const model = modelMatch ? modelMatch[1] : null;
 
-            const actionMatch = cleanedPath.match(/:([^:]+)$/);
+            const actionMatch = relevantPath.match(/:([^:]+)$/);
             const action = actionMatch ? actionMatch[1] : null;
 
             if (!model || !action) {
-                // 如果既不是模型列表也不是特定模型操作，则报错
                 throw new Response(`Vertex AI request path could not be parsed. Path: ${ctx.path}`, { status: 400 });
             }
-            targetPath = `/v1/projects/${auth.gcpProject}/locations/${loc}/publishers/google/models/${model}:${action}`;
+            targetUrlPath = `${baseUrl}/models/${model}:${action}`;
         }
 
-        // 3. 构造最终的 URL (适用于非模型列表的情况)
-        const url = new URL(`https://${host}${targetPath}`);
-
-        // 4. 复制原始请求中的其他查询参数
+        const url = new URL(targetUrlPath);
+        // Copy search params from original request, excluding auth key
         ctx.originalUrl.searchParams.forEach((v, k) => {
             if (k.toLowerCase() !== 'key') {
                 url.searchParams.set(k, v);
@@ -308,44 +288,6 @@ export class VertexAIStrategy extends BaseStrategy {
         }
     
         return bodyToModify;
-    }
-
-    override async handleResponse(res: Response, ctx: StrategyContext): Promise<Response> {
-        const cleanedPath = ctx.path.replace(/^\/v\d+(beta\d*)?\//, '/');
-
-        // 仅对模型列表的成功响应进行拦截和过滤
-        if (cleanedPath === '/models' && res.ok && res.headers.get("content-type")?.includes("application/json")) {
-            // 克隆响应，以安全地处理响应体，避免 "body already consumed" 错误
-            const resClone = res.clone();
-            try {
-                const originalBody = await resClone.json(); // 在克隆上解析
-                if (originalBody && Array.isArray(originalBody.models)) {
-                    // 筛选出 name 字段包含 '/publishers/google/' 的模型
-                    const filteredModels = originalBody.models.filter((model: any) =>
-                        model.name && typeof model.name === 'string' && model.name.includes('/publishers/google/')
-                    );
-
-                    const newBody = { ...originalBody, models: filteredModels };
-                    
-                    const newHeaders = new Headers(res.headers);
-                    const newBodyStr = JSON.stringify(newBody);
-                    newHeaders.set('Content-Length', new TextEncoder().encode(newBodyStr).length.toString());
-
-                    return new Response(newBodyStr, {
-                        status: res.status,
-                        statusText: res.statusText,
-                        headers: newHeaders,
-                    });
-                }
-            } catch (e) {
-                console.error("Error filtering Vertex AI models response:", e);
-                // 如果过滤失败，安全地返回原始的、未被消耗的响应
-                return res;
-            }
-        }
-
-        // 对于所有其他请求或失败的响应，直接返回
-        return res;
     }
 }
 
