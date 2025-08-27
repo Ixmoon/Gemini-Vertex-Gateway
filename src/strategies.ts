@@ -224,7 +224,7 @@ export class VertexAIStrategy extends BaseStrategy {
 
         const loc = this.config.gcpDefaultLocation;
         const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
-        const baseUrl = `https://${host}/v1/projects/${auth.gcpProject}/locations/${loc}/publishers/google`;
+        const trueBaseUrl = `https://${host}/v1/projects/${auth.gcpProject}/locations/${loc}`;
 
         // Strip any leading version string like /v1/ or /v1beta/ from the path
         const relevantPath = ctx.path.replace(/^\/v\d+(beta\d*)?\//, '/');
@@ -232,10 +232,12 @@ export class VertexAIStrategy extends BaseStrategy {
         let targetUrlPath: string;
 
         // Case 1: Requesting a list of models (e.g., /models)
+        // URL: .../projects/{project}/locations/{location}/models
         if (relevantPath === '/models') {
-            targetUrlPath = `${baseUrl}/models`;
+            targetUrlPath = `${trueBaseUrl}/models`;
         }
         // Case 2: Requesting a specific model with an action (e.g., /models/gemini-pro:generateContent)
+        // URL: .../projects/{project}/locations/{location}/publishers/google/models/{model_id}:{action}
         else {
             const modelMatch = relevantPath.match(/\/models\/([^:]+):/);
             const model = modelMatch ? modelMatch[1] : null;
@@ -246,7 +248,7 @@ export class VertexAIStrategy extends BaseStrategy {
             if (!model || !action) {
                 throw new Response(`Vertex AI request path could not be parsed. Path: ${ctx.path}`, { status: 400 });
             }
-            targetUrlPath = `${baseUrl}/models/${model}:${action}`;
+            targetUrlPath = `${trueBaseUrl}/publishers/google/models/${model}:${action}`;
         }
 
         const url = new URL(targetUrlPath);
