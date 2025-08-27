@@ -224,46 +224,33 @@ export class VertexAIStrategy extends BaseStrategy {
 
         const loc = this.config.gcpDefaultLocation;
         const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
+        const baseUrl = `https://${host}/v1/projects/${auth.gcpProject}/locations/${loc}/publishers/google`;
 
-        // 1. 解析 API 版本
-        const pathParts = ctx.path.split('/');
-        let apiVersion = 'v1'; // 默认版本
-        for (const part of pathParts) {
-            if (part.match(/^v\d+([a-zA-Z]+\d*)?$/)) {
-                apiVersion = part;
-                break;
-            }
-        }
+        // Strip any leading version string like /v1/ or /v1beta/ from the path
+        const relevantPath = ctx.path.replace(/^\/v\d+(beta\d*)?\//, '/');
 
-        // 2. 构建基础 URL
-        const baseUrl = `https://${host}/${apiVersion}/projects/${auth.gcpProject}/locations/${loc}`;
-
-        // 3. 根据路径内容决定最终的 URL 结构
         let targetUrlPath: string;
-        
-        // 检查是否是具体模型的操作 (包含 ':')
-        if (ctx.path.includes(':')) {
-            // 对于具体模型操作，需要 publishers/google
-            const modelMatch = ctx.path.match(/\/models\/([^:]+):/);
-            const actionMatch = ctx.path.match(/:([^:]+)$/);
-            
+
+        // Case 1: Requesting a list of models (e.g., /models)
+        if (relevantPath === '/models') {
+            targetUrlPath = `${baseUrl}/models`;
+        }
+        // Case 2: Requesting a specific model with an action (e.g., /models/gemini-pro:generateContent)
+        else {
+            const modelMatch = relevantPath.match(/\/models\/([^:]+):/);
             const model = modelMatch ? modelMatch[1] : null;
+
+            const actionMatch = relevantPath.match(/:([^:]+)$/);
             const action = actionMatch ? actionMatch[1] : null;
 
             if (!model || !action) {
-                throw new Response(`Vertex AI action request path could not be parsed. Path: ${ctx.path}`, { status: 400 });
+                throw new Response(`Vertex AI request path could not be parsed. Path: ${ctx.path}`, { status: 400 });
             }
-            targetUrlPath = `${baseUrl}/publishers/google/models/${model}:${action}`;
-        } else {
-            // 对于模型列表等非操作性请求，不加 publishers/google
-            // 我们假设最后一个非空部分是端点，例如 'models'
-            const endpoint = pathParts.filter(p => p).pop() || '';
-            targetUrlPath = `${baseUrl}/${endpoint}`;
+            targetUrlPath = `${baseUrl}/models/${model}:${action}`;
         }
 
         const url = new URL(targetUrlPath);
-        
-        // 4. 复制查询参数
+        // Copy search params from original request, excluding auth key
         ctx.originalUrl.searchParams.forEach((v, k) => {
             if (k.toLowerCase() !== 'key') {
                 url.searchParams.set(k, v);
@@ -373,85 +360,22 @@ export class GeminiNativeStrategy extends BaseStrategy {
         const model = ctx.path.match(/\/models\/([^:]+):/)?.[1] ?? null;
         return Promise.resolve(_getGeminiAuthDetails(c, ctx, model, attempt, "Gemini Native"));
     }
-    override buildTargetUrl(ctx: StrategyContext, _auth: AuthenticationDetails): URL {
-        // 特殊处理：PUT 请求是用于可恢复上传的，其路径是 Google 返回的完整路径，不应修改。
+    override buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
+        // Resumable Upload PUT requests are sent to a path like /gemini/upload/v1beta/files...
+        // The ctx.path will be /upload/v1beta/files...
         if (ctx.originalRequest.method === 'PUT' && ctx.path.startsWith('/upload/')) {
-            const targetUrl = new URL(GEMINI_UPLOAD_URL);
-            targetUrl.pathname = ctx.path; // e.g., /upload/v1beta/files/some-id
-            targetUrl.search = ctx.originalUrl.search;
+            const targetUrl = new URL(GEMINI_UPLOAD_URL); // e.g. https://generativelanguage.googleapis.com/upload
+            targetUrl.pathname = ctx.path; // e.g. /upload/v1beta/files
+            targetUrl.search = ctx.originalUrl.search; // all original query params
             return targetUrl;
         }
 
-        // 对于所有其他请求 (POST, GET)
-        const pathParts = ctx.path.split('/');
-        let apiVersion = 'v1beta'; // Gemini Native 的默认版本
-        let relevantPathIndex = -1;
-
-        // 查找第一个版本字符串
-        for (let i = 0; i < pathParts.length; i++) {
-            if (pathParts[i].match(/^v\d+([a-zA-Z]+\d*)?$/)) {
-                apiVersion = pathParts[i];
-                relevantPathIndex = i + 1;
-                break;
-            }
-        }
-
-        let apiVersionIndex = -1;
-
-        // 查找第一个版本字符串
-        for (let i = 0; i < pathParts.length; i++) {
-            if (pathParts[i].match(/^v\d+([a-zA-Z]+\d*)?$/)) {
-                apiVersion = pathParts[i];
-                apiVersionIndex = i; // 记录版本号的索引
-                break;
-            }
-        }
-
-        // 找到 'models' 或 'files' 关键字的索引，从 apiVersion 之后开始查找
-        let contentStartIndex = -1;
-        let isUpload = false;
-
-        if (apiVersionIndex !== -1) {
-            for (let i = apiVersionIndex + 1; i < pathParts.length; i++) {
-                if (pathParts[i] === 'models') {
-                    contentStartIndex = i;
-                    isUpload = false;
-                    break;
-                } else if (pathParts[i] === 'files') {
-                    contentStartIndex = i;
-                    isUpload = true;
-                    break;
-                }
-            }
-        } else { // 如果没有找到 apiVersion，则从头开始找 'models' 或 'files'
-            for (let i = 0; i < pathParts.length; i++) {
-                if (pathParts[i] === 'models') {
-                    contentStartIndex = i;
-                    isUpload = false;
-                    break;
-                } else if (pathParts[i] === 'files') {
-                    contentStartIndex = i;
-                    isUpload = true;
-                    break;
-                }
-            }
-        }
-
-        // 构建 relevantPath
-        let relevantPath: string;
-        if (contentStartIndex !== -1) {
-            relevantPath = pathParts.slice(contentStartIndex).join('/');
-        } else {
-            throw new Response(`Gemini Native request path could not be parsed: missing 'models' or 'files' segment. Path: ${ctx.path}`, { status: 400 });
-        }
-
+        // For other requests, including the initial POST to create an upload session
+        const isUpload = ctx.originalRequest.method === 'POST' && ctx.path.includes('/files');
         const baseUrl = isUpload ? GEMINI_UPLOAD_URL : GEMINI_BASE_URL;
-        
-        // 重新组合成干净的 URL 路径
-        const finalPath = `/${apiVersion}/${relevantPath}`;
-        const url = new URL(finalPath, baseUrl);
+        const url = new URL(ctx.path, baseUrl);
 
-        // 复制查询参数
+        // Copy search params from original request, excluding auth key
         ctx.originalUrl.searchParams.forEach((v, k) => {
             if (k.toLowerCase() !== 'key') {
                 url.searchParams.set(k, v);
