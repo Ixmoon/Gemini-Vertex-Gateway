@@ -238,10 +238,42 @@ export class VertexAIStrategy extends BaseStrategy {
             }
         }
 
-        // 如果没有找到版本，则整个路径都是相关的 (去掉开头的斜杠)
-        const relevantPath = relevantPathIndex !== -1
-            ? pathParts.slice(relevantPathIndex).join('/')
-            : ctx.path.startsWith('/') ? ctx.path.substring(1) : ctx.path;
+        let apiVersionIndex = -1;
+
+        // 查找第一个版本字符串
+        for (let i = 0; i < pathParts.length; i++) {
+            if (pathParts[i].match(/^v\d+([a-zA-Z]+\d*)?$/)) {
+                apiVersion = pathParts[i];
+                apiVersionIndex = i; // 记录版本号的索引
+                break;
+            }
+        }
+
+        // 找到 'models' 关键字的索引，从 apiVersion 之后开始查找
+        let modelsStartIndex = -1;
+        if (apiVersionIndex !== -1) {
+            for (let i = apiVersionIndex + 1; i < pathParts.length; i++) {
+                if (pathParts[i] === 'models') {
+                    modelsStartIndex = i;
+                    break;
+                }
+            }
+        } else { // 如果没有找到 apiVersion，则从头开始找 'models'
+            for (let i = 0; i < pathParts.length; i++) {
+                if (pathParts[i] === 'models') {
+                    modelsStartIndex = i;
+                    break;
+                }
+            }
+        }
+
+        // 构建 relevantPath
+        let relevantPath: string;
+        if (modelsStartIndex !== -1) {
+            relevantPath = pathParts.slice(modelsStartIndex).join('/');
+        } else {
+            throw new Response(`Vertex AI request path could not be parsed: missing 'models' segment. Path: ${ctx.path}`, { status: 400 });
+        }
         
         // 2. 构建基础 URL
         const baseUrl = `https://${host}/${apiVersion}/projects/${auth.gcpProject}/locations/${loc}/publishers/google`;
@@ -398,13 +430,55 @@ export class GeminiNativeStrategy extends BaseStrategy {
             }
         }
 
-        // 获取版本号之后的核心路径
-        const relevantPath = relevantPathIndex !== -1
-            ? pathParts.slice(relevantPathIndex).join('/')
-            : ctx.path.startsWith('/') ? ctx.path.substring(1) : ctx.path;
+        let apiVersionIndex = -1;
 
-        // 判断是普通 API 请求还是文件上传会话创建请求
-        const isUpload = relevantPath.startsWith('files');
+        // 查找第一个版本字符串
+        for (let i = 0; i < pathParts.length; i++) {
+            if (pathParts[i].match(/^v\d+([a-zA-Z]+\d*)?$/)) {
+                apiVersion = pathParts[i];
+                apiVersionIndex = i; // 记录版本号的索引
+                break;
+            }
+        }
+
+        // 找到 'models' 或 'files' 关键字的索引，从 apiVersion 之后开始查找
+        let contentStartIndex = -1;
+        let isUpload = false;
+
+        if (apiVersionIndex !== -1) {
+            for (let i = apiVersionIndex + 1; i < pathParts.length; i++) {
+                if (pathParts[i] === 'models') {
+                    contentStartIndex = i;
+                    isUpload = false;
+                    break;
+                } else if (pathParts[i] === 'files') {
+                    contentStartIndex = i;
+                    isUpload = true;
+                    break;
+                }
+            }
+        } else { // 如果没有找到 apiVersion，则从头开始找 'models' 或 'files'
+            for (let i = 0; i < pathParts.length; i++) {
+                if (pathParts[i] === 'models') {
+                    contentStartIndex = i;
+                    isUpload = false;
+                    break;
+                } else if (pathParts[i] === 'files') {
+                    contentStartIndex = i;
+                    isUpload = true;
+                    break;
+                }
+            }
+        }
+
+        // 构建 relevantPath
+        let relevantPath: string;
+        if (contentStartIndex !== -1) {
+            relevantPath = pathParts.slice(contentStartIndex).join('/');
+        } else {
+            throw new Response(`Gemini Native request path could not be parsed: missing 'models' or 'files' segment. Path: ${ctx.path}`, { status: 400 });
+        }
+
         const baseUrl = isUpload ? GEMINI_UPLOAD_URL : GEMINI_BASE_URL;
         
         // 重新组合成干净的 URL 路径
