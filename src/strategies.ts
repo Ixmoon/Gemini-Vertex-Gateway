@@ -222,15 +222,20 @@ export class VertexAIStrategy extends BaseStrategy {
     override buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
         if (!auth.gcpProject) throw new Error("Vertex AI requires a GCP Project ID.");
 
-        const model = ctx.parsedBody?.model;
-        if (typeof model !== 'string') {
-            throw new Response("Vertex AI request must include a 'model' in the request body.", { status: 400 });
-        }
-
         const loc = this.config.gcpDefaultLocation;
         const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
-        const isStream = ctx.parsedBody?.stream === true;
-        const action = isStream ? "streamGenerateContent" : "generateContent";
+
+        // 从 ctx.path 中提取模型 ID 和 API 动作
+        // 示例路径: /v1/projects/PROJECT_ID/locations/LOCATION_ID/publishers/google/models/MODEL_ID:ACTION
+        const modelMatch = ctx.path.match(/\/models\/([^:]+):/);
+        const model = modelMatch ? modelMatch[1] : null;
+
+        const actionMatch = ctx.path.match(/:([^:]+)$/);
+        const action = actionMatch ? actionMatch[1] : null;
+
+        if (!model || !action) {
+            throw new Response("Vertex AI request path must include a valid model ID and API action (e.g., /models/gemini-pro:generateContent).", { status: 400 });
+        }
 
         // 构造原生的 Vertex AI Gemini API 端点 URL
         const url = new URL(`https://${host}/v1/projects/${auth.gcpProject}/locations/${loc}/publishers/google/models/${model}:${action}`);
