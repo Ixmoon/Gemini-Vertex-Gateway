@@ -315,8 +315,10 @@ export class VertexAIStrategy extends BaseStrategy {
 
         // 仅对模型列表的成功响应进行拦截和过滤
         if (cleanedPath === '/models' && res.ok && res.headers.get("content-type")?.includes("application/json")) {
+            // 克隆响应，以安全地处理响应体，避免 "body already consumed" 错误
+            const resClone = res.clone();
             try {
-                const originalBody = await res.json();
+                const originalBody = await resClone.json(); // 在克隆上解析
                 if (originalBody && Array.isArray(originalBody.models)) {
                     // 筛选出 name 字段包含 '/publishers/google/' 的模型
                     const filteredModels = originalBody.models.filter((model: any) =>
@@ -337,7 +339,7 @@ export class VertexAIStrategy extends BaseStrategy {
                 }
             } catch (e) {
                 console.error("Error filtering Vertex AI models response:", e);
-                // 若过滤失败，则返回原始响应
+                // 如果过滤失败，安全地返回原始的、未被消耗的响应
                 return res;
             }
         }
