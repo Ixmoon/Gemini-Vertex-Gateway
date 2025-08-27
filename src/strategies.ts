@@ -224,23 +224,30 @@ export class VertexAIStrategy extends BaseStrategy {
 
         const loc = this.config.gcpDefaultLocation;
         const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
+        const baseUrl = `https://${host}/v1/projects/${auth.gcpProject}/locations/${loc}/publishers/google`;
 
-        // 从 ctx.path 中提取模型 ID 和 API 动作
-        // 示例路径: /v1/projects/PROJECT_ID/locations/LOCATION_ID/publishers/google/models/MODEL_ID:ACTION
-        const modelMatch = ctx.path.match(/\/models\/([^:]+):/);
-        const model = modelMatch ? modelMatch[1] : null;
+        let targetUrlPath: string;
 
-        const actionMatch = ctx.path.match(/:([^:]+)$/);
-        const action = actionMatch ? actionMatch[1] : null;
+        // Case 1: Requesting a list of models (e.g., /models)
+        if (ctx.path.endsWith('/models')) {
+            targetUrlPath = `${baseUrl}${ctx.path}`; // e.g., .../publishers/google/models
+        }
+        // Case 2: Requesting a specific model with an action (e.g., /models/gemini-pro:generateContent)
+        else {
+            const modelMatch = ctx.path.match(/\/models\/([^:]+):/);
+            const model = modelMatch ? modelMatch[1] : null;
 
-        if (!model || !action) {
-            throw new Response("Vertex AI request path must include a valid model ID and API action (e.g., /models/gemini-pro:generateContent).", { status: 400 });
+            const actionMatch = ctx.path.match(/:([^:]+)$/);
+            const action = actionMatch ? actionMatch[1] : null;
+
+            if (!model || !action) {
+                throw new Response("Vertex AI request path must include a valid model ID and API action (e.g., /models/gemini-pro:generateContent) or end with /models for listing.", { status: 400 });
+            }
+            targetUrlPath = `${baseUrl}/models/${model}:${action}`;
         }
 
-        // 构造原生的 Vertex AI Gemini API 端点 URL
-        const url = new URL(`https://${host}/v1/projects/${auth.gcpProject}/locations/${loc}/publishers/google/models/${model}:${action}`);
-        
-        // 复制原始查询参数，除了 'key'
+        const url = new URL(targetUrlPath);
+        // Copy search params from original request, excluding auth key
         ctx.originalUrl.searchParams.forEach((v, k) => {
             if (k.toLowerCase() !== 'key') {
                 url.searchParams.set(k, v);
