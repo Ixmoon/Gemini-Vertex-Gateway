@@ -208,14 +208,11 @@ export class VertexAIStrategy extends BaseStrategy {
     }
 
     override async getAuthenticationDetails(c: Context, ctx: StrategyContext, attempt: number): Promise<AuthenticationDetails> {
-        console.log("[VertexAIStrategy] 1. Entering getAuthenticationDetails.");
         const userKey = getApiKeyFromReq(c, ctx.originalUrl) || 'N/A';
         if (!this.config.triggerKeys.has(userKey)) {
             throw new Response("Forbidden: A valid trigger key is required for the /vertex endpoint.", { status: 403 });
         }
-        console.log("[VertexAIStrategy] 2. Awaiting GCP auth...");
         const auth = await this.gcpAuth();
-        console.log("[VertexAIStrategy] 3. GCP auth resolved.", auth ? "Success" : "Failed");
         if (!auth && attempt === 1) {
             throw new Response("GCP authentication failed on first attempt. Check GCP_CREDENTIALS.", { status: 503 });
         }
@@ -223,37 +220,26 @@ export class VertexAIStrategy extends BaseStrategy {
     }
 
     override buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
-        console.log("[VertexAIStrategy] 4. Entering buildTargetUrl.");
         if (!auth.gcpProject) throw new Error("Vertex AI requires a GCP Project ID.");
 
         const loc = this.config.gcpDefaultLocation;
         const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
-        const trueBaseUrl = `https://${host}/v1/projects/${auth.gcpProject}/locations/${loc}`;
+        const baseUrl = `https://${host}/v1/projects/${auth.gcpProject}/locations/${loc}/publishers/google`;
 
         // Strip any leading version string like /v1/ or /v1beta/ from the path
         const relevantPath = ctx.path.replace(/^\/v\d+(beta\d*)?\//, '/');
 
-        let targetUrlPath: string;
+    // Case 2: Requesting a specific model with an action (e.g., /models/gemini-pro:generateContent)
+        const modelMatch = relevantPath.match(/\/models\/([^:]+):/);
+        const model = modelMatch ? modelMatch[1] : null;
 
-        // Case 1: Requesting a list of models (e.g., /models)
-        // URL: .../projects/{project}/locations/{location}/models
-        if (relevantPath === '/models') {
-            targetUrlPath = `${trueBaseUrl}/models`;
+        const actionMatch = relevantPath.match(/:([^:]+)$/);
+        const action = actionMatch ? actionMatch[1] : null;
+
+        if (!model || !action) {
+            throw new Response(`Vertex AI request path could not be parsed. Path: ${ctx.path}`, { status: 400 });
         }
-        // Case 2: Requesting a specific model with an action (e.g., /models/gemini-pro:generateContent)
-        // URL: .../projects/{project}/locations/{location}/publishers/google/models/{model_id}:{action}
-        else {
-            const modelMatch = relevantPath.match(/\/models\/([^:]+):/);
-            const model = modelMatch ? modelMatch[1] : null;
-
-            const actionMatch = relevantPath.match(/:([^:]+)$/);
-            const action = actionMatch ? actionMatch[1] : null;
-
-            if (!model || !action) {
-                throw new Response(`Vertex AI request path could not be parsed. Path: ${ctx.path}`, { status: 400 });
-            }
-            targetUrlPath = `${trueBaseUrl}/publishers/google/models/${model}:${action}`;
-        }
+        const targetUrlPath = `${baseUrl}/models/${model}:${action}`;
 
         const url = new URL(targetUrlPath);
         // Copy search params from original request, excluding auth key
@@ -263,17 +249,14 @@ export class VertexAIStrategy extends BaseStrategy {
             }
         });
 
-        console.log(`[VertexAIStrategy] 5. Built target URL: ${url.toString()}`);
         return url;
     }
 
     override buildRequestHeaders(ctx: StrategyContext, auth: AuthenticationDetails): Headers {
-        console.log("[VertexAIStrategy] 6. Entering buildRequestHeaders.");
         if (!auth.gcpToken) throw new Error("Vertex AI requires a GCP Token.");
         const headers = buildBaseProxyHeaders(ctx.originalRequest.headers);
         headers.delete('authorization');
         headers.set('Authorization', `Bearer ${auth.gcpToken}`);
-        console.log("[VertexAIStrategy] 7. Built request headers.");
         return headers;
     }
 
