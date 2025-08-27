@@ -225,79 +225,45 @@ export class VertexAIStrategy extends BaseStrategy {
         const loc = this.config.gcpDefaultLocation;
         const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
 
-        // 1. 查找第一个版本字符串并确定 API 版本和相关路径
+        // 1. 解析 API 版本
         const pathParts = ctx.path.split('/');
         let apiVersion = 'v1'; // 默认版本
-        let relevantPathIndex = -1;
-
-        for (let i = 0; i < pathParts.length; i++) {
-            if (pathParts[i].match(/^v\d+([a-zA-Z]+\d*)?$/)) {
-                apiVersion = pathParts[i];
-                relevantPathIndex = i + 1;
+        for (const part of pathParts) {
+            if (part.match(/^v\d+([a-zA-Z]+\d*)?$/)) {
+                apiVersion = part;
                 break;
             }
         }
 
-        let apiVersionIndex = -1;
-
-        // 查找第一个版本字符串
-        for (let i = 0; i < pathParts.length; i++) {
-            if (pathParts[i].match(/^v\d+([a-zA-Z]+\d*)?$/)) {
-                apiVersion = pathParts[i];
-                apiVersionIndex = i; // 记录版本号的索引
-                break;
-            }
-        }
-
-        // 找到 'models' 关键字的索引，从 apiVersion 之后开始查找
-        let modelsStartIndex = -1;
-        if (apiVersionIndex !== -1) {
-            for (let i = apiVersionIndex + 1; i < pathParts.length; i++) {
-                if (pathParts[i] === 'models') {
-                    modelsStartIndex = i;
-                    break;
-                }
-            }
-        } else { // 如果没有找到 apiVersion，则从头开始找 'models'
-            for (let i = 0; i < pathParts.length; i++) {
-                if (pathParts[i] === 'models') {
-                    modelsStartIndex = i;
-                    break;
-                }
-            }
-        }
-
-        // 构建 relevantPath
-        let relevantPath: string;
-        if (modelsStartIndex !== -1) {
-            relevantPath = pathParts.slice(modelsStartIndex).join('/');
-        } else {
-            throw new Response(`Vertex AI request path could not be parsed: missing 'models' segment. Path: ${ctx.path}`, { status: 400 });
-        }
-        
         // 2. 构建基础 URL
-        const baseUrl = `https://${host}/${apiVersion}/projects/${auth.gcpProject}/locations/${loc}/publishers/google`;
+        const baseUrl = `https://${host}/${apiVersion}/projects/${auth.gcpProject}/locations/${loc}`;
 
+        // 3. 根据路径内容决定最终的 URL 结构
         let targetUrlPath: string;
-
-        // 3. 根据相关路径判断请求类型
-        if (relevantPath === 'models') {
-            targetUrlPath = `${baseUrl}/models`;
-        } else {
-            const modelMatch = relevantPath.match(/^models\/([^:]+):/);
+        
+        // 检查是否是具体模型的操作 (包含 ':')
+        if (ctx.path.includes(':')) {
+            // 对于具体模型操作，需要 publishers/google
+            const modelMatch = ctx.path.match(/\/models\/([^:]+):/);
+            const actionMatch = ctx.path.match(/:([^:]+)$/);
+            
             const model = modelMatch ? modelMatch[1] : null;
-
-            const actionMatch = relevantPath.match(/:([^:]+)$/);
             const action = actionMatch ? actionMatch[1] : null;
 
             if (!model || !action) {
-                throw new Response(`Vertex AI request path could not be parsed. Path: ${ctx.path}`, { status: 400 });
+                throw new Response(`Vertex AI action request path could not be parsed. Path: ${ctx.path}`, { status: 400 });
             }
-            targetUrlPath = `${baseUrl}/models/${model}:${action}`;
+            targetUrlPath = `${baseUrl}/publishers/google/models/${model}:${action}`;
+        } else {
+            // 对于模型列表等非操作性请求，不加 publishers/google
+            // 我们假设最后一个非空部分是端点，例如 'models'
+            const endpoint = pathParts.filter(p => p).pop() || '';
+            targetUrlPath = `${baseUrl}/${endpoint}`;
         }
 
         const url = new URL(targetUrlPath);
-        // Copy search params from original request, excluding auth key
+        
+        // 4. 复制查询参数
         ctx.originalUrl.searchParams.forEach((v, k) => {
             if (k.toLowerCase() !== 'key') {
                 url.searchParams.set(k, v);
