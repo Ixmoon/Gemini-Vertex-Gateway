@@ -222,8 +222,8 @@ export class VertexAIStrategy extends BaseStrategy {
     override buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
         if (!auth.gcpProject) throw new Error("Vertex AI requires a GCP Project ID.");
 
-        // 1. Extract location from the incoming path.
-        // e.g., /v1/projects/some-project/locations/us-central1/models
+        // 1. 从原始请求路径中提取 location。
+        // 原始请求路径可能形如 /v1/projects/PROJECT_ID/locations/LOCATION_ID/models 或 /v1beta/models/MODEL_ID:ACTION
         const locationMatch = ctx.path.match(/\/locations\/([^\/]+)/);
         const loc = locationMatch ? locationMatch[1] : this.config.gcpDefaultLocation;
         
@@ -231,18 +231,43 @@ export class VertexAIStrategy extends BaseStrategy {
 
         const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
 
-        // The client path is already well-formed, so we can use it directly.
-        const url = new URL(`https://${host}${ctx.path}`);
+        let targetPath: string;
+        let queryParamsToAdd: Record<string, string> = {};
 
-        // 2. If it's a model listing request, add the required filter.
-        // As per user instruction, the path for this is '.../models'
-        if (ctx.path.endsWith('/models')) {
-            url.searchParams.set('filter', 'publisher="google"');
+        // 2. 根据原始请求路径的结构，判断是模型列表请求还是特定模型操作请求，并构造目标路径。
+        // 移除原始路径中可能存在的 API 版本前缀，以便更准确地匹配。
+        const cleanedPath = ctx.path.replace(/^\/v\d+(beta\d*)?\//, '/');
+
+        // 检查是否是模型列表请求 (例如：/models)
+        if (cleanedPath === '/models') {
+            targetPath = `/v1/projects/${auth.gcpProject}/locations/${loc}/models`;
+            queryParamsToAdd['filter'] = 'publisher="google"';
         }
-        
-        // 3. Copy other search params from original request, excluding auth key.
+        // 检查是否是特定模型操作请求 (例如：/models/gemini-pro:generateContent)
+        else {
+            const modelMatch = cleanedPath.match(/\/models\/([^:]+):/);
+            const model = modelMatch ? modelMatch[1] : null;
+
+            const actionMatch = cleanedPath.match(/:([^:]+)$/);
+            const action = actionMatch ? actionMatch[1] : null;
+
+            if (!model || !action) {
+                // 如果既不是模型列表也不是特定模型操作，则报错
+                throw new Response(`Vertex AI request path could not be parsed. Path: ${ctx.path}`, { status: 400 });
+            }
+            targetPath = `/v1/projects/${auth.gcpProject}/locations/${loc}/publishers/google/models/${model}:${action}`;
+        }
+
+        // 3. 构造最终的 URL
+        const url = new URL(`https://${host}${targetPath}`);
+
+        // 4. 添加额外的查询参数
+        for (const key in queryParamsToAdd) {
+            url.searchParams.set(key, queryParamsToAdd[key]);
+        }
+
+        // 5. 复制原始请求中的其他查询参数，排除 'key' 和我们已经处理过的 'filter'
         ctx.originalUrl.searchParams.forEach((v, k) => {
-            // Avoid overwriting the filter we just set and the auth key.
             if (k.toLowerCase() !== 'key' && k.toLowerCase() !== 'filter') {
                 url.searchParams.set(k, v);
             }
