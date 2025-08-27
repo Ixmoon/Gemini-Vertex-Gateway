@@ -231,10 +231,7 @@ export class VertexAIStrategy extends BaseStrategy {
         const apiVersion = versionMatch ? versionMatch[1] : 'v1';
 
         // 2. Construct the base URL with the dynamic version.
-        const baseUrl = `https://${host}/${apiVersion}/projects/${auth.gcpProject}/locations/${loc}/publishers/google`;
-
-        // 3. Strip the version prefix to get the relevant part of the path.
-        const relevantPath = ctx.path.replace(new RegExp(`^/${apiVersion}/`), '/');
+        const baseUrl = `https://${host}/v1/projects/${auth.gcpProject}/locations/${loc}/publishers/google`;
 
         let targetUrlPath: string;
 
