@@ -266,18 +266,12 @@ export class VertexAIStrategy extends BaseStrategy {
         const bodyToModify = { ...body };
     
         // 强制关闭所有安全设置
-        // 强制关闭所有安全设置
         bodyToModify.safetySettings = [
             { "category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF" },
             { "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF" },
             { "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF" },
             { "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF" },
         ];
-    
-        // 移除旧的、不再需要的转换逻辑
-        if ('google' in bodyToModify) {
-            delete bodyToModify.google;
-        }
     
         return bodyToModify;
     }
