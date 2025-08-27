@@ -221,17 +221,27 @@ export class VertexAIStrategy extends BaseStrategy {
 
     override buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
         if (!auth.gcpProject) throw new Error("Vertex AI requires a GCP Project ID.");
-        const loc = this.config.gcpDefaultLocation;
-        const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
-        const baseUrl = `https://${host}/v1beta1/projects/${auth.gcpProject}/locations/${loc}/endpoints/openapi`;
 
-        let targetPath = ctx.path;
-        if (targetPath.startsWith('/v1/')) {
-            targetPath = targetPath.slice(3); // Removes "/v1" leaving "/chat/completions"
+        const model = ctx.parsedBody?.model;
+        if (typeof model !== 'string') {
+            throw new Response("Vertex AI request must include a 'model' in the request body.", { status: 400 });
         }
 
-        const url = new URL(`${baseUrl}${targetPath}`);
-        ctx.originalUrl.searchParams.forEach((v, k) => k.toLowerCase() !== 'key' && url.searchParams.set(k, v));
+        const loc = this.config.gcpDefaultLocation;
+        const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
+        const isStream = ctx.parsedBody?.stream === true;
+        const action = isStream ? "streamGenerateContent" : "generateContent";
+
+        // 构造原生的 Vertex AI Gemini API 端点 URL
+        const url = new URL(`https://${host}/v1/projects/${auth.gcpProject}/locations/${loc}/publishers/google/models/${model}:${action}`);
+        
+        // 复制原始查询参数，除了 'key'
+        ctx.originalUrl.searchParams.forEach((v, k) => {
+            if (k.toLowerCase() !== 'key') {
+                url.searchParams.set(k, v);
+            }
+        });
+
         return url;
     }
 
@@ -245,23 +255,23 @@ export class VertexAIStrategy extends BaseStrategy {
 
     override transformRequestBody(body: Record<string, any> | null): Record<string, any> | null {
         if (!body) return null;
-
+    
         const bodyToModify = { ...body };
-        if (bodyToModify.model && typeof bodyToModify.model === 'string' && !bodyToModify.model.startsWith('google/')) {
-            bodyToModify.model = `google/${bodyToModify.model}`;
+    
+        // 强制关闭所有安全设置
+        // 强制关闭所有安全设置
+        bodyToModify.safetySettings = [
+            { "category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF" },
+            { "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF" },
+            { "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF" },
+            { "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF" },
+        ];
+    
+        // 移除旧的、不再需要的转换逻辑
+        if ('google' in bodyToModify) {
+            delete bodyToModify.google;
         }
-        if (bodyToModify.reasoning_effort === 'none') {
-            delete bodyToModify.reasoning_effort;
-        }
-        bodyToModify.google = {
-            ...(bodyToModify.google || {}),
-            safety_settings: [
-                { "category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF" },
-                { "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF" },
-                { "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF" },
-                { "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF" },
-            ]
-        };
+    
         return bodyToModify;
     }
 }
