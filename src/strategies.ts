@@ -241,7 +241,8 @@ export class VertexAIStrategy extends BaseStrategy {
         // 检查是否是模型列表请求 (例如：/models)
         if (cleanedPath === '/models') {
             targetPath = `/v1/projects/${auth.gcpProject}/locations/${loc}/models`;
-            queryParamsToAdd['filter'] = 'publisher=google';
+            // 手动附加 filter 参数，以绕过 URLSearchParams 的潜在编码问题
+            targetPath += '?filter=publisher="google"';
         }
         // 检查是否是特定模型操作请求 (例如：/models/gemini-pro:generateContent)
         else {
@@ -261,12 +262,8 @@ export class VertexAIStrategy extends BaseStrategy {
         // 3. 构造最终的 URL
         const url = new URL(`https://${host}${targetPath}`);
 
-        // 4. 添加额外的查询参数
-        for (const key in queryParamsToAdd) {
-            url.searchParams.set(key, queryParamsToAdd[key]);
-        }
-
-        // 5. 复制原始请求中的其他查询参数，排除 'key' 和我们已经处理过的 'filter'
+        // 4. 复制原始请求中的其他查询参数
+        // 排除 'key' 和我们已经手动处理的 'filter'
         ctx.originalUrl.searchParams.forEach((v, k) => {
             if (k.toLowerCase() !== 'key' && k.toLowerCase() !== 'filter') {
                 url.searchParams.set(k, v);
