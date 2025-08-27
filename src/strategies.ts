@@ -243,9 +243,9 @@ export class VertexAIStrategy extends BaseStrategy {
             // 对于模型列表，'global' 是无效 location。如果当前是 global，则修正为有效的默认区域。
             const correctedLoc = loc === 'global' ? 'us-central1' : loc;
             const host = `${correctedLoc}-aiplatform.googleapis.com`;
-            targetPath = `/v1/projects/${auth.gcpProject}/locations/${correctedLoc}/publishers/google/models`;
+            // 这是官方文档支持的、获取区域内所有模型的端点。我们将在 handleResponse 中进行过滤。
+            targetPath = `/v1/projects/${auth.gcpProject}/locations/${correctedLoc}/models`;
             
-            // 因为 location 可能已改变，所以需要重新构建 URL 对象
             const url = new URL(`https://${host}${targetPath}`);
             ctx.originalUrl.searchParams.forEach((v, k) => {
                 if (k.toLowerCase() !== 'key') url.searchParams.set(k, v);
@@ -308,6 +308,42 @@ export class VertexAIStrategy extends BaseStrategy {
         }
     
         return bodyToModify;
+    }
+
+    override async handleResponse(res: Response, ctx: StrategyContext): Promise<Response> {
+        const cleanedPath = ctx.path.replace(/^\/v\d+(beta\d*)?\//, '/');
+
+        // 仅对模型列表的成功响应进行拦截和过滤
+        if (cleanedPath === '/models' && res.ok && res.headers.get("content-type")?.includes("application/json")) {
+            try {
+                const originalBody = await res.json();
+                if (originalBody && Array.isArray(originalBody.models)) {
+                    // 筛选出 name 字段包含 '/publishers/google/' 的模型
+                    const filteredModels = originalBody.models.filter((model: any) =>
+                        model.name && typeof model.name === 'string' && model.name.includes('/publishers/google/')
+                    );
+
+                    const newBody = { ...originalBody, models: filteredModels };
+                    
+                    const newHeaders = new Headers(res.headers);
+                    const newBodyStr = JSON.stringify(newBody);
+                    newHeaders.set('Content-Length', new TextEncoder().encode(newBodyStr).length.toString());
+
+                    return new Response(newBodyStr, {
+                        status: res.status,
+                        statusText: res.statusText,
+                        headers: newHeaders,
+                    });
+                }
+            } catch (e) {
+                console.error("Error filtering Vertex AI models response:", e);
+                // 若过滤失败，则返回原始响应
+                return res;
+            }
+        }
+
+        // 对于所有其他请求或失败的响应，直接返回
+        return res;
     }
 }
 
