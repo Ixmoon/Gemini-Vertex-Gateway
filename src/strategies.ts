@@ -220,6 +220,31 @@ export class VertexAIStrategy extends BaseStrategy {
     }
 
     override buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
+        // 检查是 OpenAI 兼容请求还是原生请求
+        if (ctx.path.startsWith('/openai')) {
+            // OpenAI 兼容模式
+            if (!auth.gcpProject) throw new Error("Vertex AI requires a GCP Project ID.");
+            const loc = this.config.gcpDefaultLocation;
+            const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
+            const baseUrl = `https://${host}/v1/projects/${auth.gcpProject}/locations/${loc}/publishers/google`;
+            const model = ctx.parsedBody?.model as string || 'gemini-1.0-pro'; // 使用默认模型作为后备
+            const openAIPath = `${baseUrl}/models/${model}:streamGenerateContent`;
+            const url = new URL(openAIPath);
+            
+            // 复制原始查询参数，除了 'key'
+            ctx.originalUrl.searchParams.forEach((v, k) => {
+                if (k.toLowerCase() !== 'key') {
+                    url.searchParams.set(k, v);
+                }
+            });
+            return url;
+        } else {
+            // 原生 API 模式
+            return this.buildTargetUrl_Native(ctx, auth);
+        }
+    }
+
+    private buildTargetUrl_Native(ctx: StrategyContext, auth: AuthenticationDetails): URL {
         if (!auth.gcpProject) throw new Error("Vertex AI requires a GCP Project ID.");
 
         const loc = this.config.gcpDefaultLocation;
@@ -260,14 +285,12 @@ export class VertexAIStrategy extends BaseStrategy {
         return headers;
     }
 
-    override transformRequestBody(body: Record<string, any> | null): Record<string, any> | null {
-        if (!body || !body.safetySettings) {
-            return body;
-        }
+    override transformRequestBody(body: Record<string, any> | null, _ctx: StrategyContext): Record<string, any> | null {
+        if (!body) return null;
     
         const bodyToModify = { ...body };
     
-        // 仅当请求中包含安全设置时，才强制关闭所有安全设置
+        // 统一强制关闭所有安全设置
         bodyToModify.safetySettings = [
             { "category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF" },
             { "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF" },
