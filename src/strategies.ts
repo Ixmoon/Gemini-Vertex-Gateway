@@ -274,10 +274,17 @@ export class VertexAIStrategy extends BaseStrategy {
         return headers;
     }
 
-    override transformRequestBody(body: Record<string, any> | null, _ctx: StrategyContext): Record<string, any> | null {
+    override transformRequestBody(body: Record<string, any> | null, ctx: StrategyContext): Record<string, any> | null {
         if (!body) return null;
     
         const bodyToModify = { ...body };
+
+        // 如果是 openapi 请求，确保模型名称包含发布者前缀
+        if (ctx.path.startsWith('/openai')) {
+            if (typeof bodyToModify.model === 'string' && !bodyToModify.model.includes('/')) {
+                bodyToModify.model = `google/${bodyToModify.model}`;
+            }
+        }
     
         // 统一强制关闭所有安全设置
         bodyToModify.safetySettings = [
