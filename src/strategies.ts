@@ -261,11 +261,13 @@ export class VertexAIStrategy extends BaseStrategy {
     }
 
     override transformRequestBody(body: Record<string, any> | null): Record<string, any> | null {
-        if (!body) return null;
+        if (!body || !body.safetySettings) {
+            return body;
+        }
     
         const bodyToModify = { ...body };
     
-        // 强制关闭所有安全设置
+        // 仅当请求中包含安全设置时，才强制关闭所有安全设置
         bodyToModify.safetySettings = [
             { "category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF" },
             { "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF" },
