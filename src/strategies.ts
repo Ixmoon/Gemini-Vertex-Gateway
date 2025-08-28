@@ -220,54 +220,43 @@ export class VertexAIStrategy extends BaseStrategy {
     }
 
     override buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
-        // 检查是 OpenAI 兼容请求还是原生请求
-        if (ctx.path.startsWith('/openai')) {
-            // OpenAI 兼容模式
-            if (!auth.gcpProject) throw new Error("Vertex AI requires a GCP Project ID.");
-            const loc = this.config.gcpDefaultLocation;
-            const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
-            const baseUrl = `https://${host}/v1beta1/projects/${auth.gcpProject}/locations/${loc}/endpoints/openapi`;
-            const model = ctx.parsedBody?.model as string || 'gemini-2.5-pro'; 
-            const openAIPath = `${baseUrl}/models/${model}:streamGenerateContent`;
-            const url = new URL(openAIPath);
-            
-            // 复制原始查询参数，除了 'key'
-            ctx.originalUrl.searchParams.forEach((v, k) => {
-                if (k.toLowerCase() !== 'key') {
-                    url.searchParams.set(k, v);
-                }
-            });
-            return url;
-        } else {
-            // 原生 API 模式
-            return this.buildTargetUrl_Native(ctx, auth);
-        }
-    }
-
-    private buildTargetUrl_Native(ctx: StrategyContext, auth: AuthenticationDetails): URL {
         if (!auth.gcpProject) throw new Error("Vertex AI requires a GCP Project ID.");
-
         const loc = this.config.gcpDefaultLocation;
         const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
-        const baseUrl = `https://${host}/v1/projects/${auth.gcpProject}/locations/${loc}/publishers/google`;
+        let url: URL;
 
-        // Strip any leading version string like /v1/ or /v1beta/ from the path
-        const relevantPath = ctx.path.replace(/^\/v\d+(beta\d*)?\//, '/');
+        // 检查是 OpenAI 兼容请求还是原生请求
+        if (ctx.path.startsWith('/openai')) {
+            // OpenAI 兼容模式 (根据用户提供的正确逻辑)
+            const baseUrl = `https://${host}/v1beta1/projects/${auth.gcpProject}/locations/${loc}/endpoints/openapi`;
+            let targetPath = ctx.path.substring('/openai'.length); // 移除 /openai 前缀
+            if (targetPath.startsWith('/v1')) {
+                targetPath = targetPath.slice(3); // 移除 /v1 前缀
+            }
+            url = new URL(`${baseUrl}${targetPath}`);
+        } else {
+            // 原生 API 模式
+            const baseUrl = `https://${host}/v1/projects/${auth.gcpProject}/locations/${loc}/publishers/google`;
+            const relevantPath = ctx.path.replace(/^\/v\d+(beta\d*)?\//, '/');
+            let targetUrlPath: string;
 
-    // Case 2: Requesting a specific model with an action (e.g., /models/gemini-pro:generateContent)
-        const modelMatch = relevantPath.match(/\/models\/([^:]+):/);
-        const model = modelMatch ? modelMatch[1] : null;
+            if (relevantPath === '/models') {
+                targetUrlPath = `${baseUrl}/models`;
+            } else {
+                const modelMatch = relevantPath.match(/\/models\/([^:]+):/);
+                const model = modelMatch ? modelMatch[1] : null;
+                const actionMatch = relevantPath.match(/:([^:]+)$/);
+                const action = actionMatch ? actionMatch[1] : null;
 
-        const actionMatch = relevantPath.match(/:([^:]+)$/);
-        const action = actionMatch ? actionMatch[1] : null;
-
-        if (!model || !action) {
-            throw new Response(`Vertex AI request path could not be parsed. Path: ${ctx.path}`, { status: 400 });
+                if (!model || !action) {
+                    throw new Response(`Vertex AI native request path could not be parsed. Path: ${ctx.path}`, { status: 400 });
+                }
+                targetUrlPath = `${baseUrl}/models/${model}:${action}`;
+            }
+            url = new URL(targetUrlPath);
         }
-        const targetUrlPath = `${baseUrl}/models/${model}:${action}`;
-
-        const url = new URL(targetUrlPath);
-        // Copy search params from original request, excluding auth key
+        
+        // 统一复制原始查询参数，除了 'key'
         ctx.originalUrl.searchParams.forEach((v, k) => {
             if (k.toLowerCase() !== 'key') {
                 url.searchParams.set(k, v);
