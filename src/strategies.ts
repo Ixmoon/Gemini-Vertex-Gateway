@@ -226,8 +226,8 @@ export class VertexAIStrategy extends BaseStrategy {
             if (!auth.gcpProject) throw new Error("Vertex AI requires a GCP Project ID.");
             const loc = this.config.gcpDefaultLocation;
             const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
-            const baseUrl = `https://${host}/v1/projects/${auth.gcpProject}/locations/${loc}/endpoints/openapi`;
-            const model = ctx.parsedBody?.model as string || 'gemini-2.5-pro'; // 使用默认模型作为后备
+            const baseUrl = `https://${host}/v1beta1/projects/${auth.gcpProject}/locations/${loc}/endpoints/openapi`;
+            const model = ctx.parsedBody?.model as string || 'gemini-2.5-pro'; 
             const openAIPath = `${baseUrl}/models/${model}:streamGenerateContent`;
             const url = new URL(openAIPath);
             
