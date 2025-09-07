@@ -141,3 +141,13 @@ export const _getGeminiAuthDetails = (c: Context, ctx: StrategyContext, model: s
         maxRetries: result?.source === 'pool' ? config.apiRetryLimit : 1
     };
 };
+
+/**
+ * 通过检查 Authorization 头来判断请求是否为 OpenAI 兼容格式。
+ * 这是区分 OpenAI 客户端和 Gemini/Vertex 原生客户端的核心依据。
+ * @param headers 请求头
+ * @returns 如果是 OpenAI 兼容格式则返回 true，否则返回 false。
+ */
+export const isRequestOpenAICompatible = (headers: Headers): boolean => {
+    return !!headers.get("Authorization")?.toLowerCase().startsWith('bearer ');
+};

@@ -15,6 +15,7 @@
 import { Hono, Context } from "hono";
 import { configManager, strategyManager } from "./managers.ts";
 import type { RequestType, StrategyContext } from "./types.ts";
+import { isRequestOpenAICompatible } from "./auth.ts";
 
 // =================================================================================
 // --- 1. 策略选择器与主处理函数 ---
@@ -48,7 +49,7 @@ const determineRequestType = (c: Context): { type: RequestType | "UNKNOWN", pref
         const prefix = '/gemini';
         const path = pathname.slice(prefix.length);
         
-        const isGeminiOpenAI = !!c.req.header("Authorization")?.includes('Bearer');
+        const isGeminiOpenAI = isRequestOpenAICompatible(c.req.raw.headers);
         return { type: isGeminiOpenAI ? "GEMINI_OPENAI" : "GEMINI_NATIVE", prefix, path };
     }
 

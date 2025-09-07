@@ -14,7 +14,7 @@ import type { Context } from "hono";
 import { configManager } from "./managers.ts";
 import type { AppConfig } from "./managers.ts";
 import type { AuthenticationDetails, RequestHandlerStrategy, StrategyContext } from "./types.ts";
-import { getApiKeyFromReq, buildBaseProxyHeaders, _getGeminiAuthDetails } from "./auth.ts";
+import { getApiKeyFromReq, buildBaseProxyHeaders, _getGeminiAuthDetails, isRequestOpenAICompatible } from "./auth.ts";
 import { createStreamingTextReplacer } from "./utils.ts";
 
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
@@ -225,11 +225,10 @@ export class VertexAIStrategy extends BaseStrategy {
         const host = loc === "global" ? "aiplatform.googleapis.com" : `${loc}-aiplatform.googleapis.com`;
         let url: URL;
 
-        // 检查是 OpenAI 兼容请求还是原生请求
-        if (ctx.path.startsWith('/openai')) {
-            // OpenAI 兼容模式 (根据用户提供的正确逻辑)
+        if (isRequestOpenAICompatible(ctx.originalRequest.headers)) {
+            // OpenAI 兼容模式
             const baseUrl = `https://${host}/v1beta1/projects/${auth.gcpProject}/locations/${loc}/endpoints/openapi`;
-            let targetPath = ctx.path.substring('/openai'.length); // 移除 /openai 前缀
+            let targetPath = ctx.path;
             if (targetPath.startsWith('/v1')) {
                 targetPath = targetPath.slice(3); // 移除 /v1 前缀
             }
@@ -241,6 +240,8 @@ export class VertexAIStrategy extends BaseStrategy {
             let targetUrlPath: string;
 
             if (relevantPath === '/models') {
+                // 对于 /models，原生和 OpenAI 兼容路径可能冲突，但辅助函数已处理
+                // 这里我们假设如果进入原生分支，就是请求原生模型列表
                 targetUrlPath = `${baseUrl}/models`;
             } else {
                 const modelMatch = relevantPath.match(/\/models\/([^:]+):/);
@@ -279,8 +280,8 @@ export class VertexAIStrategy extends BaseStrategy {
     
         const bodyToModify = { ...body };
 
-        // 如果是 openapi 请求，确保模型名称包含发布者前缀
-        if (ctx.path.startsWith('/openai')) {
+        // 如果是 OpenAI 兼容请求，确保模型名称包含发布者前缀
+        if (isRequestOpenAICompatible(ctx.originalRequest.headers)) {
             if (typeof bodyToModify.model === 'string' && !bodyToModify.model.includes('/')) {
                 bodyToModify.model = `google/${bodyToModify.model}`;
             }
