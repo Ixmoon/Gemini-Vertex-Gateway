@@ -2,37 +2,32 @@
 
 ## 这是什么?
 
-一个专为 Google Gemini 和 Vertex AI 服务设计的、通过**构建时配置**的**无状态** API 网关。它充当一个智能、安全的中继，旨在简化认证、管理 API 密钥和凭证，并提供智能路由——所有这些都无需数据库。
+一个无状态、透明的 API 网关，旨在简化对 Google Gemini 和 Vertex AI 服务的访问。它的核心是一个简单、安全且智能的**透传代理**。
 
-将您的请求指向此网关的统一端点（如 `/gemini`、`/vertex`）。网关会依据在构建时注入的单一配置文件，透明地处理认证（包括 Gemini 密钥轮换和 GCP 凭证轮换）、根据请求格式或模型进行路由，并将请求安全地转发给相应的 Google 服务。它还支持 WebSocket 代理和可续传文件上传等高级功能。
+项目的核心理念是**客户端自由**。您可以使用现有的 Gemini 客户端 (Google AI SDK) 或 OpenAI 兼容客户端，只需将请求指向此网关，即可无缝工作。网关会在后台处理复杂的认证（为 Gemini 轮换 API 密钥，为 Vertex AI 轮换 GCP 凭证），因此您只需要一个简单的密钥即可访问所有服务。
 
 ## 核心解决的问题
 
-*   **密钥与凭证安全**: 防止在客户端代码中暴露 Google API 密钥或 GCP 服务账号凭证。所有机密信息在构建过程中被安全注入。
-*   **简化认证**: 客户端仅需一个统一的“触发密钥”即可通过网关访问所有已配置的后端服务。
-*   **配额管理**: 通过为无状态请求自动轮换 API 密钥池，有效缓解 Gemini API 的配额限制问题。
-*   **可用性与重试**: 当请求失败时，自动使用池中的其他密钥或凭证进行重试，从而提高服务的可靠性。
-*   **有状态操作安全**: 确保文件上传、模型微调等操作被路由到专用的、非轮换的密钥，以保证操作的一致性。
+*   **简化 Vertex AI 认证**: 像使用 Gemini API 一样，仅通过一个 API 密钥就能轻松使用 Vertex AI，无需在客户端处理复杂的 GCP 服务账号认证。
+*   **密钥与凭证安全**: 防止在客户端代码中暴露您的 Google API 密钥或 GCP 服务账号凭证。
+*   **配额管理与可靠性**: 通过自动轮换密钥/凭证池和重试失败请求，有效缓解 API 配额限制并提高服务可靠性。
+*   **有状态操作安全**: 保证需要保持一致性的操作（如文件上传或 WebSocket 会话）始终被路由到单个专用的 API 密钥。
 
 ## 核心特性
 
-*   **统一的 API 端点**: 提供 `/gemini` 和 `/vertex` 作为访问所有 Google LLM 服务的清晰、一致的入口。
-*   **智能 Gemini 路由**: `/gemini` 端点能自动区分 **Gemini 原生 API** 请求（如 `/v1beta/...`）和 **OpenAI 兼容 API** 请求（如 `/v1/chat/completions`），并进行正确路由。
-*   **全面的 Vertex AI 支持**: `/vertex` 端点同时支持 **Vertex AI 原生 API** 和 **OpenAI 兼容** 请求，简化集成工作。
-*   **高级密钥管理**:
-    *   **Gemini 密钥轮换与重试**: 对无状态请求，自动从密钥池 (`poolKeys`) 中轮换密钥，以管理配额并在失败时重试。
-    *   **有状态请求安全**: 自动将有状态操作（如文件上传、微调）路由到专用的 `fallbackKey`，确保会话一致性。
-    *   **GCP 凭证轮换**: 对 Vertex AI 的调用，自动轮换 GCP 服务账号凭证池，增强安全性与可用性。
-*   **高级功能支持**:
-    *   **透明的文件上传处理**: 通过重写上传 URL，正确处理 Gemini 的可续传文件上传工作流。
-    *   **原生 WebSocket 代理**: 为 Gemini 的双向流式端点（如音乐生成）提供原生支持，这是许多代理所不具备的功能。
-*   **无状态与易于部署**: 无需数据库或外部存储。配置在构建时被打包，使得部署和扩展极为简单。
+*   **客户端自由**: `/gemini` 和 `/vertex` 两个端点均可接受 **Gemini API 格式**和 **OpenAI API 格式**的请求。您可以使用任何您喜欢的客户端。
+*   **统一的端点**:
+    *   `/gemini`: 代理至 Google AI Gemini API，使用轮换的 Google API 密钥池进行认证。
+    *   `/vertex`: 代理至 Vertex AI API，使用轮换的 GCP 服务账号凭证池进行认证。
+*   **高级密钥管理**: 自动为无状态请求使用轮换密钥池 (`poolKeys`)，并为有状态操作（文件上传、WebSocket）使用专用密钥 (`fallbackKey`)，以确保稳定性。
+*   **通用透传代理**: `apiMappings` 功能允许您为任何其他 API（如 Anthropic Claude 等）配置简单的透明代理，实现统一的路径路由。
+*   **无状态与易于部署**: 无需数据库。配置在构建时被打包，使得部署和扩展极为简单。
 
 ## 适合谁用?
 
-*   基于 Google Gemini 或 Vertex AI API 构建应用的开发者。
+*   希望在客户端代码中免除 GCP 认证流程，轻松使用 Vertex AI 的开发者。
 *   寻求集中化、安全且简化地管理 Google API 密钥和 GCP 凭证的团队。
-*   希望通过自动重试和密钥轮换来提高 LLM API 调用可靠性和可用性的用户。
+*   希望通过自动重试和密钥轮换来提高 LLM API 调用可靠性的用户。
 
 ## 快速部署 (推荐: 通过 GitHub Actions 部署到 Deno Deploy)
 
@@ -57,7 +52,7 @@
 
 ## 如何配置 (通过 `secrets.config.json`)
 
-所有配置都通过项目根目录下的 `secrets.config.json` 文件进行管理。在部署时，该文件的内容需要被设置到 GitHub Repository Secret 中。
+所有配置都通过 `secrets.config.json` 文件进行管理。在部署时，该文件的内容需要被设置到 GitHub Repository Secret 中。
 
 **重要**: 这个文件不应被提交到 Git。`.gitignore` 中已包含此规则。
 
@@ -72,103 +67,75 @@
   "fallbackModels": [],
   "apiRetryLimit": 1,
   "gcpDefaultLocation": "global",
-  "apiMappings": {
-    "/gemini": "https://generativelanguage.googleapis.com"
-  }
+  "apiMappings": {}
 }
 ```
 
 ### 字段说明
 
-*   **`apiMappings` (必需)**: 定义路径前缀到目标 URL 的映射。
-    *   **示例**: `"apiMappings": { "/gemini": "https://generativelanguage.googleapis.com", "/other": "https://api.example.com" }`
-    *   **说明**: 必须包含一个用于 Gemini 的映射。`/vertex` 是一个内置的特殊路径，无需在此配置。
+*   **`triggerKeys` (必需)**: 网关的“通行证”数组。您的客户端将使用其中一个密钥（而不是真实的 API 密钥）来激活网关的智能功能。
+    *   **格式**: `["gateway_key_1", "gateway_key_2"]`
 
-*   **`triggerKeys` (必需)**: 客户端调用网关时所需的“通行证”列表。
-    *   **格式**: 字符串数组, `["key1", "key2"]`
+*   **`poolKeys` (用于 `/gemini`)**: 一个由您真实的 Google API 密钥组成的池。`/gemini` 端点将使用此池进行密钥轮换。
+    *   **格式**: `["google_api_key_1", "google_api_key_2"]`
 
-*   **`poolKeys` (用于 Gemini)**: 存放 Google API 密钥的池，用于 Gemini API 无状态请求的轮换和重试。
-    *   **格式**: 字符串数组, `["g_api_key1", "g_api_key2"]`
+*   **`fallbackKey` (有状态操作必需)**: 一个专用的、固定的 Google API 密钥。网关会**自动**将任何有状态请求（如文件上传、WebSocket）路由到此密钥，以保证会话的一致性。
+    *   **格式**: 单个字符串, 例如 `"dedicated_google_api_key"`
 
-*   **`fallbackKey` & `fallbackModels` (可选但推荐)**:
-    *   `fallbackKey`: 一个专用的 Google API 密钥。**至关重要的是，此密钥用于所有有状态请求（如文件上传或微调）以确保会话一致性。** 它也用于 `fallbackModels` 中列出的模型。
-    *   `fallbackModels`: 一个模型名称列表。对这些模型的请求将被直接路由到 `fallbackKey`。
-    *   **格式**: `fallbackKey` 为字符串或 `null`；`fallbackModels` 为字符串数组。
+*   **`fallbackModels` (可选)**: 一个模型名称列表。强制对这些模型的请求始终使用更可靠的 `fallbackKey`。
+    *   **格式**: `["gemini-1.5-pro-latest"]`
 
-*   **`gcpCredentials` (用于 Vertex AI)**: 存放一个或多个 GCP 服务账号凭证 (JSON 对象) 的数组。每次请求都会轮换使用。
+*   **`gcpCredentials` (用于 `/vertex`)**: 一个 GCP 服务账号凭证对象 (JSON 格式) 的数组。`/vertex` 端点将使用此池进行凭证轮换。
     *   **格式**: `[{...cred1...}, {...cred2...}]`
 
-*   **`gcpDefaultLocation` (用于 Vertex AI)**: GCP 项目的区域。
-    *   **格式**: 字符串, 例如 `"us-central1"`。
-    *   **默认值**: `"global"`
+*   **`gcpDefaultLocation` (用于 `/vertex`)**: GCP 项目的默认区域。
+    *   **格式**: 字符串, 例如 `"us-central1"`。默认值: `"global"`
 
-*   **`apiRetryLimit` (可选)**: 在调用失败时，从池 (`poolKeys` 或 `gcpCredentials`) 中最多尝试多少个不同的密钥/凭证。
-    *   **格式**: 数字, 例如 `3`。
-    *   **默认值**: `1`
+*   **`apiRetryLimit` (可选)**: 在调用失败时，从池中最多尝试多少个不同的密钥/凭证。
+    *   **格式**: 数字, 例如 `3`。默认值: `1`
 
-## 如何调用 API
+*   **`apiMappings` (可选)**: 为任何其他 API 定义简单的透明透传代理。键是路径前缀，值是目标基础 URL。
+    *   **示例**: `{ "/claude": "https://api.anthropic.com" }`
 
-### 调用 Vertex AI (通过 `/vertex`)
+## 如何使用网关
 
-1.  **构造 URL**: `https://<你的网关网址>/vertex/<原始 Vertex AI API 路径>`
-    *   *原生示例*: `.../vertex/v1/projects/.../locations/.../publishers/google/models/gemini-1.0-pro:streamGenerateContent`
-    *   *OpenAI 兼容示例*: `.../vertex/openai/v1/chat/completions`
-2.  **添加认证**: 请求头加入 `Authorization: Bearer <你的触发密钥>`。
-3.  **发送请求**: 网关将使用轮换的 GCP 凭证进行认证并转发。
+您可以使用现有的 **Gemini 客户端** 或 **OpenAI 客户端**。只需在客户端配置中更改 API 密钥和接口地址即可。
 
-### 调用 Google Gemini (通过 `/gemini`)
+### 使用 `/gemini` 端点
+*   **功能**: 使用您轮换的 `poolKeys` 代理到 Google AI Gemini API。
+*   **适用客户端**: Gemini 客户端, OpenAI 客户端。
+*   **如何使用**:
+    *   将 **API 密钥** 设置为您的 `triggerKey`。
+    *   将 **接口地址 / Base URL** 设置为 `https://<你的网关网址>/gemini`。
 
-此端点智能处理多种请求类型：
+### 使用 `/vertex` 端点
+*   **功能**: 使用您轮换的 `gcpCredentials` 代理到 Vertex AI API，简化认证流程。
+*   **适用客户端**: Gemini 客户端, OpenAI 客户端。
+*   **如何使用**:
+    *   将 **API 密钥** 设置为您的 `triggerKey`。
+    *   将 **接口地址 / Base URL** 设置为 `https://<你的网关网址>/vertex`。
 
-*   **原生 API 请求**:
-    *   **URL**: `https://<你的网关网址>/gemini/v1beta/models/gemini-pro:generateContent`
-*   **OpenAI 兼容请求**:
-    *   **URL**: `https://<你的网关网址>/gemini/v1/chat/completions`
-*   **文件上传 (有状态)**:
-    *   **URL**: `https://<你的网关网址>/gemini/upload/v1beta/files`
-*   **WebSocket (有状态)**:
-    *   **URL**: `wss://<你的网关网址>/ws/google.ai.generativelanguage.v1alpha.GenerativeService/BidiGenerateMusic`
-
-**认证**: 请求头加入 `Authorization: Bearer <你的触发密钥>`。网关将根据请求类型自动选择正确的密钥（从密钥池或备用密钥中选择）。
-
-### 调用其他服务 (通过自定义前缀)
-
-1.  **构造 URL**: `https://<你的网关网址>/<你自定义的前缀>/<目标服务路径>`
-2.  **添加认证**: 请求头加入 `Authorization: Bearer <你的触发密钥>`。
-3.  **发送请求**: 网关执行基础 URL 转发。
+### 使用自定义 `apiMappings` (例如 `/claude`)
+*   **功能**: 一个简单的透传代理，将请求转发到您定义的目标 URL。
+*   **适用客户端**: 任何与目标 API 匹配的客户端 (例如 Anthropic 的 SDK)。
+*   **如何使用**:
+    *   将 **接口地址 / Base URL** 设置为 `https://<你的网关网址>/claude`。
+    *   认证信息会直接透传，因此请根据目标服务的要求在客户端中配置 API 密钥。
 
 ## (可选) 本地运行
 
 1.  **安装 Deno**: 参考 [Deno 官网](https://deno.land/)。
-2.  **创建配置文件**: 在项目根目录创建一个 `secrets.config.json` 文件，并填入你的配置。
-3.  **生成配置模块**: 运行构建脚本来生成 `src/config_data.ts`。
-    ```bash
-    deno run -A build.ts
-    ```
-4.  **运行服务**:
-    ```bash
-    deno run --allow-net ./src/deno_index.ts
-    ```
+2.  **创建配置文件**: 在项目根目录创建一个 `secrets.config.json` 文件并填入配置。
+3.  **生成配置模块**: `deno run -A build.ts`
+4.  **运行服务**: `deno run --allow-net ./src/deno_index.ts`
 5.  **访问**: 服务默认运行在 `http://localhost:8000`。
 
 ## 更新机密与重新部署
 
-当您在本地修改了 `secrets.config.json` 文件后，需要将这些更改同步到 GitHub Secrets 并触发一次新的部署。我们提供了一个批处理脚本来自动化这个流程。
+当您在本地修改了 `secrets.config.json` 文件后，可以使用提供的脚本来同步更改并重新部署。
 
-### 使用 `redeploy.bat` 脚本
+### 使用 `redeploy.bat` 脚本 (Windows)
 
-此脚本专为 Windows 用户设计，旨在简化更新和重新部署的流程。
-
-1.  **前提条件: GitHub CLI**
-    *   您必须已安装 [GitHub CLI](https://cli.github.com/)。
-    *   您必须已通过 CLI 进行了身份验证。如果尚未操作，请在终端中运行 `gh auth login` 并按照提示完成登录。
-
-2.  **如何运行**
-    *   在项目根目录，直接运行 `redeploy.bat` 文件即可。您可以在终端（如 CMD 或 PowerShell）中输入 `./redeploy.bat` 来执行，或者在 Windows 文件资源管理器中直接双击它。
-
-3.  **脚本功能**
-    该脚本会自动完成两个关键步骤：
-    *   读取您本地的 `secrets.config.json` 文件，并安全地更新您 GitHub 仓库中的 `SECRETS_CONFIG_JSON` 机密信息。
-    *   接着，它会触发一次 `deploy.yml` GitHub Actions 工作流的新运行，该工作流将使用您刚刚更新的机密来构建和部署您的网关。
-
-您可以在 GitHub 仓库的 "Actions" 选项卡中查看到新的部署进度。
+1.  **前提条件**: 安装 [GitHub CLI](https://cli.github.com/) 并通过 `gh auth login` 登录。
+2.  **运行**: 直接双击 `redeploy.bat` 文件，或在终端中运行 `./redeploy.bat`。
+3.  **功能**: 脚本会自动将您本地的配置安全地更新到 GitHub 的 `SECRETS_CONFIG_JSON`，并触发一次新的部署工作流。您可以在仓库的 "Actions" 选项卡中查看部署进度。
