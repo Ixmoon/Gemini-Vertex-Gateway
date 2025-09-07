@@ -10,3 +10,4 @@ gui_config.json
 
 # Python cache
 autogetkeys/__pycache__/
+getkeys/
