@@ -1,40 +1,38 @@
-# Gemini与Vertex 网关
+# 智能 Gemini & Vertex AI API 网关
 
 ## 这是什么?
 
-一个为 Google Gemini 和 Vertex AI API 设计的、通过**构建时生成的配置文件**配置的无状态 API 网关。它旨在简化访问、认证和密钥管理，提升安全性和可用性。
+一个专为 Google Gemini 和 Vertex AI 服务设计的、通过**构建时配置**的**无状态** API 网关。它充当一个智能、安全的中继，旨在简化认证、管理 API 密钥和凭证，并提供智能路由——所有这些都无需数据库。
 
-此网关充当一个智能中转站。将发往 Google 的请求指向此网关配置的路径（如 `/gemini` 或 `/vertex`），网关会依据配置文件，自动处理认证（包括 Gemini Key 轮换和 GCP 凭证轮换）、根据模型名称或路径进行智能路由，并将请求安全地转发给 Google 的相应服务。
+将您的请求指向此网关的统一端点（如 `/gemini`、`/vertex`）。网关会依据在构建时注入的单一配置文件，透明地处理认证（包括 Gemini 密钥轮换和 GCP 凭证轮换）、根据请求格式或模型进行路由，并将请求安全地转发给相应的 Google 服务。它还支持 WebSocket 代理和可续传文件上传等高级功能。
 
-同时，它也提供基础的 HTTP 代理功能，可配置其他路径前缀以转发请求至任意网络服务。
+## 核心解决的问题
 
-## 核心解决 (针对 Google LLM API)
+*   **密钥与凭证安全**: 防止在客户端代码中暴露 Google API 密钥或 GCP 服务账号凭证。所有机密信息在构建过程中被安全注入。
+*   **简化认证**: 客户端仅需一个统一的“触发密钥”即可通过网关访问所有已配置的后端服务。
+*   **配额管理**: 通过为无状态请求自动轮换 API 密钥池，有效缓解 Gemini API 的配额限制问题。
+*   **可用性与重试**: 当请求失败时，自动使用池中的其他密钥或凭证进行重试，从而提高服务的可靠性。
+*   **有状态操作安全**: 确保文件上传、模型微调等操作被路由到专用的、非轮换的密钥，以保证操作的一致性。
 
-*   **密钥/凭证安全**: 避免在客户端或应用代码中暴露 Google API 密钥或 GCP 服务账号凭证。
-*   **简化认证**: 客户端仅需使用统一的“触发密钥”即可通过网关访问。
-*   **Gemini 密钥管理**: 通过密钥池实现 Gemini API Key 的自动轮换和失败重试，应对额度限制。
-*   **Vertex AI 凭证管理**: 实现 GCP 服务账号凭证的自动轮换，简化 Vertex AI 认证。
-*   **智能路由**:
-    *   通过专用路径 `/vertex` 直达 Vertex AI。
-    *   通过 `/gemini` 路径，根据请求格式自动适配 **Gemini 原生 API** 或 **OpenAI 兼容 API**。
-    *   根据模型名称将请求路由至指定的 **Fallback Key**。
+## 核心特性
 
-## 核心优势
-
-*   **OpenAI API 兼容层**: 通过 `/gemini` 路径，可直接使用兼容 OpenAI `v1/chat/completions` 等接口的客户端访问 Gemini 模型。
-*   **专用 Vertex AI 端点**: 使用 `/vertex` 路径，为 Vertex AI 提供专属、清晰的请求路由。
-*   **模型驱动的路由**:
-    *   根据模型名称将请求路由到指定的 **Fallback Key**。此功能常用于将特定请求（如使用付费模型）导向专用密钥，实现成本优化或精细化访问控制。
-*   **Gemini 密钥轮换与重试**: 对于发往 Gemini API 的请求，自动从“主密钥池”中轮流选择 API Key，并在调用失败时根据配置尝试池中其他密钥。
-*   **增强安全性**: 将真实的 Google API 密钥和 GCP 服务账号凭证与应用代码解耦，通过在构建时注入的方式保证安全。
-*   **统一入口与简化认证**: 使用 `/gemini`, `/vertex` 等作为访问 Google LLM 服务的统一路径，客户端仅需管理和使用简单的“触发密钥”。
-*   **无状态与易于部署**: 无需数据库或外部存储，配置在构建时被打包，极大简化了部署和扩展。
+*   **统一的 API 端点**: 提供 `/gemini` 和 `/vertex` 作为访问所有 Google LLM 服务的清晰、一致的入口。
+*   **智能 Gemini 路由**: `/gemini` 端点能自动区分 **Gemini 原生 API** 请求（如 `/v1beta/...`）和 **OpenAI 兼容 API** 请求（如 `/v1/chat/completions`），并进行正确路由。
+*   **全面的 Vertex AI 支持**: `/vertex` 端点同时支持 **Vertex AI 原生 API** 和 **OpenAI 兼容** 请求，简化集成工作。
+*   **高级密钥管理**:
+    *   **Gemini 密钥轮换与重试**: 对无状态请求，自动从密钥池 (`poolKeys`) 中轮换密钥，以管理配额并在失败时重试。
+    *   **有状态请求安全**: 自动将有状态操作（如文件上传、微调）路由到专用的 `fallbackKey`，确保会话一致性。
+    *   **GCP 凭证轮换**: 对 Vertex AI 的调用，自动轮换 GCP 服务账号凭证池，增强安全性与可用性。
+*   **高级功能支持**:
+    *   **透明的文件上传处理**: 通过重写上传 URL，正确处理 Gemini 的可续传文件上传工作流。
+    *   **原生 WebSocket 代理**: 为 Gemini 的双向流式端点（如音乐生成）提供原生支持，这是许多代理所不具备的功能。
+*   **无状态与易于部署**: 无需数据库或外部存储。配置在构建时被打包，使得部署和扩展极为简单。
 
 ## 适合谁用?
 
-*   需要调用 Google Gemini 或 Vertex AI API 的开发者。
-*   寻求简化和保护 Google API 密钥及 GCP 凭证管理的个人或团队。
-*   希望提高 Google LLM API 调用稳定性和可用性的用户。
+*   基于 Google Gemini 或 Vertex AI API 构建应用的开发者。
+*   寻求集中化、安全且简化地管理 Google API 密钥和 GCP 凭证的团队。
+*   希望通过自动重试和密钥轮换来提高 LLM API 调用可靠性和可用性的用户。
 
 ## 快速部署 (推荐: 通过 GitHub Actions 部署到 Deno Deploy)
 
@@ -89,21 +87,22 @@
 *   **`triggerKeys` (必需)**: 客户端调用网关时所需的“通行证”列表。
     *   **格式**: 字符串数组, `["key1", "key2"]`
 
-*   **`poolKeys` (用于 Gemini)**: 存放 Google API 密钥的池，用于 Gemini API 的轮换和重试。
+*   **`poolKeys` (用于 Gemini)**: 存放 Google API 密钥的池，用于 Gemini API 无状态请求的轮换和重试。
     *   **格式**: 字符串数组, `["g_api_key1", "g_api_key2"]`
 
-*   **`fallbackKey` & `fallbackModels` (可选)**: 设置一个专用的 Google API 密钥，并指定哪些模型的请求应直接路由至此密钥。
-    *   `fallbackKey`: **格式**: 单个字符串或 `null`
-    *   `fallbackModels`: **格式**: 字符串数组, `["gemini-pro", "gemini-ultra"]`
+*   **`fallbackKey` & `fallbackModels` (可选但推荐)**:
+    *   `fallbackKey`: 一个专用的 Google API 密钥。**至关重要的是，此密钥用于所有有状态请求（如文件上传或微调）以确保会话一致性。** 它也用于 `fallbackModels` 中列出的模型。
+    *   `fallbackModels`: 一个模型名称列表。对这些模型的请求将被直接路由到 `fallbackKey`。
+    *   **格式**: `fallbackKey` 为字符串或 `null`；`fallbackModels` 为字符串数组。
 
-*   **`gcpCredentials` (用于 Vertex AI)**: 存放一个或多个 GCP 服务账号凭证 (JSON 对象) 的数组。
+*   **`gcpCredentials` (用于 Vertex AI)**: 存放一个或多个 GCP 服务账号凭证 (JSON 对象) 的数组。每次请求都会轮换使用。
     *   **格式**: `[{...cred1...}, {...cred2...}]`
 
 *   **`gcpDefaultLocation` (用于 Vertex AI)**: GCP 项目的区域。
     *   **格式**: 字符串, 例如 `"us-central1"`。
     *   **默认值**: `"global"`
 
-*   **`apiRetryLimit` (可选)**: 在使用主密钥池或 GCP 凭证调用失败时，最多尝试多少个不同的密钥/凭证。
+*   **`apiRetryLimit` (可选)**: 在调用失败时，从池 (`poolKeys` 或 `gcpCredentials`) 中最多尝试多少个不同的密钥/凭证。
     *   **格式**: 数字, 例如 `3`。
     *   **默认值**: `1`
 
@@ -111,25 +110,30 @@
 
 ### 调用 Vertex AI (通过 `/vertex`)
 
-1.  **构造 URL**: `https://<你的专属网址>/vertex/<原始 Vertex AI API 路径>`
-    *   *示例*: `https://<你的网址>/vertex/v1/chat/completions` (使用 OpenAI 兼容模式)
+1.  **构造 URL**: `https://<你的网关网址>/vertex/<原始 Vertex AI API 路径>`
+    *   *原生示例*: `.../vertex/v1/projects/.../locations/.../publishers/google/models/gemini-1.0-pro:streamGenerateContent`
+    *   *OpenAI 兼容示例*: `.../vertex/openai/v1/chat/completions`
 2.  **添加认证**: 请求头加入 `Authorization: Bearer <你的触发密钥>`。
 3.  **发送请求**: 网关将使用轮换的 GCP 凭证进行认证并转发。
 
 ### 调用 Google Gemini (通过 `/gemini`)
 
-此端点智能处理两种请求：
+此端点智能处理多种请求类型：
 
-*   **原生 API 请求**: 路径匹配 `/v1beta/**`。
-    *   **URL**: `https://<你的网址>/gemini/v1beta/models/gemini-pro:generateContent`
-*   **OpenAI 兼容请求**: 路径匹配 `/v1/**` 或其他非原生路径。
-    *   **URL**: `https://<你的网址>/gemini/v1/chat/completions`
+*   **原生 API 请求**:
+    *   **URL**: `https://<你的网关网址>/gemini/v1beta/models/gemini-pro:generateContent`
+*   **OpenAI 兼容请求**:
+    *   **URL**: `https://<你的网关网址>/gemini/v1/chat/completions`
+*   **文件上传 (有状态)**:
+    *   **URL**: `https://<你的网关网址>/gemini/upload/v1beta/files`
+*   **WebSocket (有状态)**:
+    *   **URL**: `wss://<你的网关网址>/ws/google.ai.generativelanguage.v1alpha.GenerativeService/BidiGenerateMusic`
 
-**认证**: 请求头加入 `Authorization: Bearer <你的触发密钥>`。网关将根据模型和密钥池配置自动处理。
+**认证**: 请求头加入 `Authorization: Bearer <你的触发密钥>`。网关将根据请求类型自动选择正确的密钥（从密钥池或备用密钥中选择）。
 
 ### 调用其他服务 (通过自定义前缀)
 
-1.  **构造 URL**: `https://<你的专属网址>/<你自定义的前缀>/<目标服务路径>`
+1.  **构造 URL**: `https://<你的网关网址>/<你自定义的前缀>/<目标服务路径>`
 2.  **添加认证**: 请求头加入 `Authorization: Bearer <你的触发密钥>`。
 3.  **发送请求**: 网关执行基础 URL 转发。
 
@@ -147,25 +151,24 @@
     ```
 5.  **访问**: 服务默认运行在 `http://localhost:8000`。
 
----
-
-祝使用愉快！
 ## 更新机密与重新部署
 
 当您在本地修改了 `secrets.config.json` 文件后，需要将这些更改同步到 GitHub Secrets 并触发一次新的部署。我们提供了一个批处理脚本来自动化这个流程。
 
 ### 使用 `redeploy.bat` 脚本
 
-1.  **确保 GitHub CLI 已安装并登录**
-    *   如果您尚未安装 GitHub CLI，或者在终端中运行 `gh` 命令时提示找不到命令，请参考[官方文档](https://cli.github.com/)进行安装和配置。
-    *   确保您已经通过 `gh auth login` 成功登录。
+此脚本专为 Windows 用户设计，旨在简化更新和重新部署的流程。
 
-2.  **运行脚本**
-    *   在项目根目录，直接运行 `redeploy.bat` 文件。
-    *   您可以在 CMD 或 PowerShell 终端中执行 `./redeploy.bat`，或者直接在文件资源管理器中双击它。
+1.  **前提条件: GitHub CLI**
+    *   您必须已安装 [GitHub CLI](https://cli.github.com/)。
+    *   您必须已通过 CLI 进行了身份验证。如果尚未操作，请在终端中运行 `gh auth login` 并按照提示完成登录。
 
-脚本会自动完成以下两件事：
-1.  将您本地 `secrets.config.json` 的内容更新到 GitHub 仓库中名为 `SECRETS_CONFIG_JSON` 的机密。
-2.  触发一次新的部署工作流，该工作流将使用您刚刚更新的机密。
+2.  **如何运行**
+    *   在项目根目录，直接运行 `redeploy.bat` 文件即可。您可以在终端（如 CMD 或 PowerShell）中输入 `./redeploy.bat` 来执行，或者在 Windows 文件资源管理器中直接双击它。
+
+3.  **脚本功能**
+    该脚本会自动完成两个关键步骤：
+    *   读取您本地的 `secrets.config.json` 文件，并安全地更新您 GitHub 仓库中的 `SECRETS_CONFIG_JSON` 机密信息。
+    *   接着，它会触发一次 `deploy.yml` GitHub Actions 工作流的新运行，该工作流将使用您刚刚更新的机密来构建和部署您的网关。
 
 您可以在 GitHub 仓库的 "Actions" 选项卡中查看到新的部署进度。
