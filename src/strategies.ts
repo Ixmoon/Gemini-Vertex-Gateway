@@ -540,6 +540,7 @@ export class GeminiToVertexStrategy extends BaseStrategy {
             url.searchParams.set('key', auth.key);
         }
 
+        console.log(`[GeminiToVertexStrategy] Proxying to target URL: ${url.toString()}`);
         return url;
     }
 
