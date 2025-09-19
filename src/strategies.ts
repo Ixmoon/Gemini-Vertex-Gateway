@@ -19,6 +19,7 @@ import { createStreamingTextReplacer } from "./utils.ts";
 
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 const GEMINI_UPLOAD_URL = "https://generativelanguage.googleapis.com/upload";
+const VERTEX_API_KEY_BASE_URL = "https://aiplatform.googleapis.com";
 const MAX_BUFFER_SIZE_BYTES = 100 * 1024 * 1024; // 100MB
 
 // =================================================================================
@@ -483,4 +484,70 @@ export class GenericProxyStrategy extends BaseStrategy {
         return url;
     }
     override buildRequestHeaders(ctx: StrategyContext, _auth: AuthenticationDetails) { return buildBaseProxyHeaders(ctx.originalRequest.headers); }
+}
+
+// =================================================================================
+// --- 5. Gemini to Vertex (API Key) 策略 ---
+// =================================================================================
+
+export class GeminiToVertexStrategy extends BaseStrategy {
+    constructor() {
+        super();
+    }
+
+    override async prepareRequestBody(req: Request, _c: Context) {
+        // 此策略不支持重试，因此我们无需缓冲请求体。
+        // 这允许在不将大文件缓冲到内存中的情况下进行流式传输。
+        return {
+            bodyForFirstAttempt: req.body,
+            getCachedBodyForRetry: () => Promise.resolve(null),
+            parsedBodyPromise: Promise.resolve(null), // 此策略无需检查请求体
+            retriesEnabled: false,
+        };
+    }
+
+    override getAuthenticationDetails(c: Context, ctx: StrategyContext, _attempt: number): Promise<AuthenticationDetails> {
+        const userApiKey = getApiKeyFromReq(c, ctx.originalUrl);
+        if (!userApiKey) {
+            throw new Response(`API key is required for this endpoint.`, { status: 401 });
+        }
+        // 此端点不使用触发密钥、备用密钥或密钥池。不进行重试。
+        return Promise.resolve({ key: userApiKey, source: 'user', gcpToken: null, gcpProject: null, maxRetries: 1 });
+    }
+
+    override buildTargetUrl(ctx: StrategyContext, auth: AuthenticationDetails): URL {
+        // 示例 ctx.path: /v1/models/gemini-pro:generateContent
+        // 目标路径: /v1/publishers/google/models/gemini-pro:generateContent
+        const geminiPath = ctx.path;
+        
+        // 一个简单的替换方法，在版本号后插入 '/publishers/google'
+        const vertexPath = geminiPath.replace(/(\/v\d+(beta\d*)?\/)/, `$1publishers/google/`);
+
+        if (vertexPath === geminiPath) {
+             throw new Response(`Invalid path format for Gemini-to-Vertex proxy. Expected format like /v1/models/model-name:action. Path: ${ctx.path}`, { status: 400 });
+        }
+
+        const url = new URL(vertexPath, VERTEX_API_KEY_BASE_URL);
+
+        // 复制原始请求中的查询参数，但我们会显式添加密钥
+        ctx.originalUrl.searchParams.forEach((v, k) => {
+            if (k.toLowerCase() !== 'key') {
+                url.searchParams.set(k, v);
+            }
+        });
+        
+        if (auth.key) {
+            url.searchParams.set('key', auth.key);
+        }
+
+        return url;
+    }
+
+    override buildRequestHeaders(ctx: StrategyContext, _auth: AuthenticationDetails): Headers {
+        const h = buildBaseProxyHeaders(ctx.originalRequest.headers);
+        // 清理原始请求中的任何身份验证头，因为我们正在 URL 中使用 API 密钥
+        h.delete('authorization');
+        h.delete('x-goog-api-key');
+        return h;
+    }
 }

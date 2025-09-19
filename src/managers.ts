@@ -18,7 +18,7 @@ import * as configData from "./config_data.ts";
 import type { GoogleAuth } from "google-auth-library";
 import type { GcpCredentials, RequestHandlerStrategy, RequestType } from "./types.ts";
 import { OptimizedRoundRobinSelector } from "./utils.ts";
-import { VertexAIStrategy, GeminiOpenAIStrategy, GeminiNativeStrategy, GenericProxyStrategy } from "./strategies.ts";
+import { VertexAIStrategy, GeminiOpenAIStrategy, GeminiNativeStrategy, GenericProxyStrategy, GeminiToVertexStrategy } from "./strategies.ts";
 
 // =================================================================================
 // --- 1. 通用懒加载管理器 ---
@@ -195,6 +195,8 @@ class StrategyManager {
                     return new GeminiOpenAIStrategy();
                 case "GEMINI_NATIVE":
                     return new GeminiNativeStrategy();
+               case "GEMINI_TO_VERTEX":
+                   return new GeminiToVertexStrategy();
                 case "GENERIC_PROXY":
                     return new GenericProxyStrategy(config);
                 default: {

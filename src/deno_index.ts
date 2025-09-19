@@ -44,6 +44,11 @@ const determineRequestType = (c: Context): { type: RequestType | "UNKNOWN", pref
         return { type: "VERTEX_AI", prefix: '/vertex', path: pathname.slice('/vertex'.length) };
     }
 
+   // 1.5. Gemini-to-Vertex (API Key) 代理
+   if (pathname.startsWith('/vtx/')) {
+       return { type: "GEMINI_TO_VERTEX", prefix: '/vtx', path: pathname.slice('/vtx'.length) };
+   }
+
     // 2. 检查 Gemini 的特殊路径
     if (pathname.startsWith('/gemini/')) {
         const prefix = '/gemini';

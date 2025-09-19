@@ -30,7 +30,7 @@ export type ApiKeyResult = { key: string; source: ApiKeySource };
 /**
  * 请求的类型。使用字符串字面量联合类型以获得更好的类型安全性和可调试性。
  */
-export type RequestType = "VERTEX_AI" | "GEMINI_OPENAI" | "GEMINI_NATIVE" | "GENERIC_PROXY";
+export type RequestType = "VERTEX_AI" | "GEMINI_OPENAI" | "GEMINI_NATIVE" | "GENERIC_PROXY" | "GEMINI_TO_VERTEX";
 
 /** 认证详情，包含 API 密钥、GCP 令牌等信息 */
 export interface AuthenticationDetails {
