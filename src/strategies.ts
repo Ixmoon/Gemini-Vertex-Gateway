@@ -520,8 +520,8 @@ export class GeminiToVertexStrategy extends BaseStrategy {
         // 目标路径: /v1/publishers/google/models/gemini-pro:generateContent
         const geminiPath = ctx.path;
         
-        // 一个简单的替换方法，在版本号后插入 '/publishers/google'
-        const vertexPath = geminiPath.replace(/(\/v\d+(beta\d*)?\/)/, `$1publishers/google/`);
+        // 查找版本部分（如 /v1/, /v1beta/）并将其替换为规范的 Vertex AI v1 路径。
+        const vertexPath = geminiPath.replace(/\/v\d+(beta\d*)?\//, '/v1/publishers/google/');
 
         if (vertexPath === geminiPath) {
              throw new Response(`Invalid path format for Gemini-to-Vertex proxy. Expected format like /v1/models/model-name:action. Path: ${ctx.path}`, { status: 400 });
@@ -540,7 +540,6 @@ export class GeminiToVertexStrategy extends BaseStrategy {
             url.searchParams.set('key', auth.key);
         }
 
-        console.log(`[GeminiToVertexStrategy] Proxying to target URL: ${url.toString()}`);
         return url;
     }
 
