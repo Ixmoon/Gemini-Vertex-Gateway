@@ -19,6 +19,8 @@ The core idea is **client freedom**. You can use your existing Gemini client (Go
 *   **Unified Endpoints**:
     *   `/gemini`: Proxies to the Google AI Gemini API, authenticating with a rotating pool of Google API keys.
     *   `/vertex`: Proxies to the Vertex AI API, authenticating with a rotating pool of GCP service account credentials.
+*   **Vertex API Key Proxy**: The `/vtx` endpoint allows you to use Gemini-style API key authentication to access Vertex AI. Just provide your real API key, and the gateway will convert the Gemini-style URL to the Vertex format and proxy the request.
+    *   Example: `POST /vtx/v1/models/gemini-2.5-pro:streamGenerateContent?key=YOUR_API_KEY` will be proxied to `https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-pro:streamGenerateContent?key=YOUR_API_KEY`
 *   **Advanced Key Management**: Automatically uses a rotating key pool (`poolKeys`) for stateless requests and a dedicated key (`fallbackKey`) for stateful operations (file uploads, WebSockets) to ensure stability.
 *   **Generic Passthrough Proxy**: The `apiMappings` feature allows you to configure simple, transparent proxies for any other API (like Anthropic Claude, etc.), using the same path-based routing.
 *   **Stateless & Easy Deployment**: No database required. Configuration is bundled at build time, making deployment and scaling trivial.

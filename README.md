@@ -19,6 +19,8 @@
 *   **统一的端点**:
     *   `/gemini`: 代理至 Google AI Gemini API，使用轮换的 Google API 密钥池进行认证。
     *   `/vertex`: 代理至 Vertex AI API，使用轮换的 GCP 服务账号凭证池进行认证。
+*   **Vertex API 密钥代理**: `/vtx` 端点允许您用 Gemini 风格的 API 密钥认证方式访问 Vertex AI。只需提供真实 API 密钥，网关会自动将 Gemini 风格的 URL 转换为 Vertex 格式并代理请求。
+    *   示例：`POST /vtx/v1/models/gemini-2.5-pro:streamGenerateContent?key=YOUR_API_KEY` 会被代理到 `https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-pro:streamGenerateContent?key=YOUR_API_KEY`
 *   **高级密钥管理**: 自动为无状态请求使用轮换密钥池 (`poolKeys`)，并为有状态操作（文件上传、WebSocket）使用专用密钥 (`fallbackKey`)，以确保稳定性。
 *   **通用透传代理**: `apiMappings` 功能允许您为任何其他 API（如 Anthropic Claude 等）配置简单的透明代理，实现统一的路径路由。
 *   **无状态与易于部署**: 无需数据库。配置在构建时被打包，使得部署和扩展极为简单。
