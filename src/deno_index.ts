@@ -154,10 +154,6 @@ const handleGenericProxy = async (c: Context): Promise<Response> => {
                     ...details
                 };
 
-                if (context.parsedBody) {
-                    console.log("Request Body JSON:", JSON.stringify(context.parsedBody, null, 2));
-                }
-
                 const auth = await strategy.getAuthenticationDetails(c, context, attempts);
                 
                 if (attempts === 1) {
