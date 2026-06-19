@@ -37,7 +37,7 @@ jobs:
         run: deno run -A build.ts
 
       - name: Deploy to Deno Deploy
-        uses: denoland/deployctl@v2
+        uses: denoland/deployctl@v1
         with:
           # 关键：将这里替换成您在新版 Deno Deploy 控制台创建的 App 名称
           app: "gemini-vertex-gateway"
