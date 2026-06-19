@@ -38,4 +38,4 @@ jobs:
       - name: Deploy to Deno Deploy
         env:
           DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
-        run: deno deploy --org=ixmoon --app=gemini-vertex-gateway --entrypoint=src/deno_index.ts --prod
+        run: deno deploy --org=ixmoon --app=gemini-vertex-gateway --prod
