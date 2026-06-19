@@ -1,8 +1,5 @@
 # Secret configuration file
 secrets.config.json
 
-# Auto-generated configuration module
-src/config_data.ts
-
 # Python cache
 getkeys/

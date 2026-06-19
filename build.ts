@@ -10,12 +10,12 @@ try {
   // 2. 生成 TypeScript 文件内容
   const tsContent = `// @ts-nocheck
 // =================================================================================
-// !!! DO NOT COMMIT THIS FILE TO VERSION CONTROL !!!
 // 该文件由 build.ts 在构建时自动生成，包含敏感的配置数据。
+// CI 部署时会覆盖仓库中的空占位文件，生成结果仅存在于 CI，不会被提交回仓库。
 // =================================================================================
 
-// 这一行是为了让生成的文件能够复用主应用中的类型定义
-import type { GcpCredentials } from "./deno_index.ts";
+// 复用主应用中的类型定义
+import type { GcpCredentials } from "./types.ts";
 
 // 导出所有从 JSON 文件读取的配置
 export const gcpCredentials: GcpCredentials[] = ${JSON.stringify(secrets.gcpCredentials ?? [], null, 2)};
