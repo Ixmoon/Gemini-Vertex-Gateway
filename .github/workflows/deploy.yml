@@ -13,8 +13,7 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      id-token: write # 允许工作流获取 OIDC 令牌进行无密码认证
-      contents: read  # 允许工作流读取仓库内容
+      contents: read
 
     steps:
       - name: Clone repository
@@ -37,4 +36,6 @@ jobs:
         run: deno run -A build.ts
 
       - name: Deploy to Deno Deploy
+        env:
+          DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
         run: deno run -A jsr:@deno/deployctl deploy --app=gemini-vertex-gateway --entrypoint=src/deno_index.ts
