@@ -1,7 +1,7 @@
 {
 	"imports": {
-		"hono": "https://deno.land/x/hono@v4.3.11/mod.ts",
-		"hono/middleware": "https://deno.land/x/hono@v4.3.11/middleware.ts",
-		"google-auth-library": "https://esm.sh/google-auth-library"
+		"hono": "jsr:@hono/hono",
+		"hono/middleware": "jsr:@hono/hono/middleware",
+		"google-auth-library": "npm:google-auth-library"
 	}
 }
